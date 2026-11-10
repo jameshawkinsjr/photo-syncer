@@ -1,0 +1,13 @@
+# Build output
+.build/
+build/
+.swiftpm/
+*.dmg
+
+# macOS
+.DS_Store
+
+# Local notes for Claude Code: may mention the maintainer's own accounts and setup.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
