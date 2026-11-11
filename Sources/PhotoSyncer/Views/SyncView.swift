@@ -7,14 +7,15 @@ struct SyncView: View {
     @State private var editing: Mapping?
     @State private var adding = false
 
-    private var groups: [(source: SourceRef, mappings: [Mapping])] {
-        var order: [SourceRef] = []
-        var bySource: [SourceRef: [Mapping]] = [:]
+    private var groups: [(key: String, source: SourceRef, mappings: [Mapping])] {
+        var order: [String] = []
+        var bySource: [String: [Mapping]] = [:]
         for mapping in model.config.mappings {
-            if bySource[mapping.source] == nil { order.append(mapping.source) }
-            bySource[mapping.source, default: []].append(mapping)
+            let key = mapping.source.groupKey
+            if bySource[key] == nil { order.append(key) }
+            bySource[key, default: []].append(mapping)
         }
-        return order.map { ($0, bySource[$0]!) }
+        return order.map { ($0, bySource[$0]![0].source, bySource[$0]!) }
     }
 
     var body: some View {
@@ -23,7 +24,7 @@ struct SyncView: View {
                 emptyState
             } else {
                 List {
-                    ForEach(groups, id: \.source) { group in
+                    ForEach(groups, id: \.key) { group in
                         Section {
                             ForEach(group.mappings) { mapping in
                                 MappingRow(mapping: mapping, onEdit: { editing = mapping })

@@ -9,11 +9,22 @@ struct MappingStatus {
     var syncedCount: Int = 0
 }
 
+/// Another Mac was syncing when this one tried to: the person can wait or sync anyway.
+struct LockConflict: Identifiable {
+    let id = UUID()
+    let holder: SyncLock.Holder
+    let mappings: [Mapping]
+    let confirmed: Set<UUID>
+}
+
 @MainActor
 final class AppModel: ObservableObject {
-    let storage = Storage()
-    let log: SyncLog
+    @Published private(set) var storage = Storage.standard()
+    private(set) var log: SyncLog!
     private(set) var engine: SyncEngine!
+    private(set) var lock: SyncLock!
+    /// When config.json was last read or written here, to notice changes from another Mac.
+    private var configStamp: Date?
 
     @Published var config: AppConfig
     @Published var statuses: [UUID: MappingStatus] = [:]
@@ -22,14 +33,31 @@ final class AppModel: ObservableObject {
     @Published var logLines: [String] = []
     @Published var signingIn: Account?
     @Published var pane: Pane? = .sync
+    @Published var lockConflict: LockConflict?
 
     private var syncTask: Task<Void, Never>?
     /// Service clients made during a sync, so refreshed cookies can be saved afterwards.
     private var liveServices: [UUID: RemoteService] = [:]
 
     init() {
+        config = AppConfig()
+        open(storage)
+        let center = NotificationCenter.default
+        center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.reloadIfChanged() }
+        }
+        center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.lock.release() }
+        }
+    }
+
+    /// Loads everything from a storage location (at launch, and after moving the data folder).
+    private func open(_ storage: Storage) {
+        self.storage = storage
         log = SyncLog(directory: storage.logsDirectory)
+        lock = SyncLock(url: storage.lockURL)
         config = storage.loadConfig()
+        configStamp = storage.configModified
         engine = SyncEngine(storage: storage, serviceFactory: { [weak self] account in
             guard let self else { throw SyncError.cancelled }
             return try await self.makeService(account)
@@ -40,16 +68,37 @@ final class AppModel: ObservableObject {
                 if (self?.logLines.count ?? 0) > 500 { self?.logLines.removeFirst(100) }
             }
         }
-        if let today = try? String(contentsOf: log.todayURL, encoding: .utf8) {
-            logLines = today.split(separator: "\n").suffix(300).map(String.init)
-        }
+        logLines = (try? String(contentsOf: log.todayURL, encoding: .utf8))
+            .map { $0.split(separator: "\n").suffix(300).map(String.init) } ?? []
+        statuses = [:]
         refreshCounts()
     }
 
     // MARK: Config
 
     func save() {
-        do { try storage.saveConfig(config) } catch { log.write("Couldn't save settings: \(error.localizedDescription)") }
+        do {
+            try storage.saveConfig(config)
+            configStamp = storage.configModified
+        } catch {
+            log.write("Couldn't save settings: \(error.localizedDescription)")
+        }
+    }
+
+    /// Picks up settings changed on another Mac (when the window comes forward, and before syncing).
+    func reloadIfChanged() {
+        guard !isSyncing, let modified = storage.configModified, modified != configStamp else { return }
+        config = storage.loadConfig()
+        configStamp = modified
+        refreshCounts()
+    }
+
+    /// Points this Mac at another sync data folder; see `Storage.relocate`.
+    func moveDataFolder(to folder: URL, moveData: Bool) throws {
+        guard !isSyncing else { throw SyncError.unexpected("Wait for the sync to finish first.") }
+        let moved = try storage.relocate(to: folder, moveData: moveData)
+        open(moved)
+        log.write(moveData ? "Moved the sync data to \(moved.dataPath)" : "Now using the sync data in \(moved.dataPath)")
     }
 
     func account(_ id: UUID) -> Account? { config.account(id) }
@@ -192,26 +241,54 @@ final class AppModel: ObservableObject {
     // MARK: Syncing
 
     func syncAll() {
+        reloadIfChanged()
         run(config.mappings.filter(\.enabled), confirmed: [])
     }
 
     func sync(_ mapping: Mapping, confirmed: Bool = false) {
+        reloadIfChanged()
         run([mapping], confirmed: confirmed ? [mapping.id] : [])
+    }
+
+    /// Syncs even though another Mac seems to be syncing (it may have crashed or gone to sleep).
+    func syncAnyway(_ conflict: LockConflict) {
+        lockConflict = nil
+        run(conflict.mappings, confirmed: conflict.confirmed, force: true)
     }
 
     func cancel() {
         syncTask?.cancel()
     }
 
-    private func run(_ mappings: [Mapping], confirmed: Set<UUID>) {
+    private func run(_ mappings: [Mapping], confirmed: Set<UUID>, force: Bool = false) {
         guard !isSyncing, !mappings.isEmpty else { return }
+        do {
+            try lock.acquire(force: force)
+        } catch SyncLock.Failure.busy(let holder) {
+            lockConflict = LockConflict(holder: holder, mappings: mappings, confirmed: confirmed)
+            return
+        } catch {
+            log.write("Couldn't write the sync lock: \(error.localizedDescription)")
+        }
         isSyncing = true
+        let lock = lock!
+        let heartbeat = Task.detached {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+                lock.touch()
+            }
+        }
         for mapping in mappings {
             statuses[mapping.id, default: MappingStatus()].progress = SyncProgress(mappingId: mapping.id, phase: "Waiting…")
             statuses[mapping.id]?.outcome = nil
         }
         log.write("Sync started (\(mappings.count) \(mappings.count == 1 ? "mapping" : "mappings"))")
         syncTask = Task {
+            // Ask rather than fail: an ad hoc rebuild changes the app's signature, and macOS
+            // then forgets the Photos permission. If it was denied, this returns at once.
+            if mappings.contains(where: { if case .photosAlbum = $0.source { true } else { false } }) {
+                _ = await PhotosLibrary.requestAccess()
+            }
             for mapping in mappings {
                 if Task.isCancelled {
                     statuses[mapping.id]?.progress = nil
@@ -231,6 +308,8 @@ final class AppModel: ObservableObject {
                 statuses[current.id]?.outcome = outcome
             }
             await finishServices()
+            heartbeat.cancel()
+            lock.release()
             refreshCounts()
             log.write(Task.isCancelled ? "Sync cancelled" : "Sync finished")
             isSyncing = false

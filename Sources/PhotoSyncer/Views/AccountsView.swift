@@ -89,7 +89,7 @@ struct AccountRow: View {
             }
             Menu {
                 Button("Check Sign-In") { Task { await model.verify(account) } }
-                Button("Rename…", action: onRename)
+                Button("Settings…", action: onRename)
                 if account.service == .pixstar {
                     Button("Back Up an Album…", action: onBackup)
                 }
@@ -115,8 +115,10 @@ struct AccountRow: View {
         case .folder: return account.folderPath.map { ($0 as NSString).abbreviatingWithTildeInPath } ?? "No folder chosen"
         default:
             let who = account.signedInAs.map { "Signed in as \($0)" } ?? account.service.displayName
-            if let size = account.maxPixelSize { return who + " · photos downsized to \(size) px" }
-            return who
+            var changes: [String] = []
+            if let size = account.maxPixelSize { changes.append("downsized to \(size) px") }
+            if let quality = account.jpegQuality { changes.append("compressed (\(PhotoCompression.label(for: quality)))") }
+            return changes.isEmpty ? who : who + " · photos " + changes.joined(separator: ", ")
         }
     }
 }
@@ -195,6 +197,11 @@ struct RenameSheet: View {
     @State private var name = ""
     @State private var downsize = false
     @State private var size = 2048
+    @State private var compress = false
+    @State private var quality = PhotoCompression.standard
+    @State private var estimate: SizeEstimate?
+    @State private var estimating: String?
+    @State private var estimateError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -205,8 +212,19 @@ struct RenameSheet: View {
                 if downsize {
                     Stepper("Longest side: \(size) px", value: $size, in: 1024...8192, step: 256)
                 }
-                Text("Pix-Star keeps small copies anyway, so downsizing makes uploads much faster. Amazon matches photos by their exact bytes, so leave it off there.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Toggle("Compress photos before uploading", isOn: $compress)
+                if compress {
+                    Picker("Compression", selection: $quality) {
+                        ForEach(PhotoCompression.levels, id: \.quality) { level in
+                            Text(level.name).tag(level.quality)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                Text(help).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Divider()
+                sizes
             }
             HStack {
                 Spacer()
@@ -215,6 +233,7 @@ struct RenameSheet: View {
                     var updated = account
                     updated.name = name.isEmpty ? account.name : name
                     updated.maxPixelSize = downsize ? size : nil
+                    updated.jpegQuality = compress ? quality : nil
                     model.updateAccount(updated)
                     onClose()
                 }
@@ -222,12 +241,131 @@ struct RenameSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 440)
+        .frame(width: 480)
+        // The estimate depends on the downsizing chosen, so it's dropped when that changes.
+        .onChange(of: downsize) { _, _ in estimate = nil }
+        .onChange(of: size) { _, _ in estimate = nil }
         .onAppear {
             name = account.name
             downsize = account.maxPixelSize != nil
             size = account.maxPixelSize ?? 2048
+            compress = account.jpegQuality != nil
+            quality = account.jpegQuality.map(PhotoCompression.nearest) ?? PhotoCompression.standard
         }
+    }
+
+    private var hasMappings: Bool { model.config.mappings.contains { $0.accountId == account.id } }
+
+    @ViewBuilder private var sizes: some View {
+        HStack {
+            Text("Album sizes").font(.headline)
+            Spacer()
+            if let estimating {
+                ProgressView().controlSize(.small)
+                Text(estimating).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            } else {
+                Button(estimate == nil ? "Estimate Sizes" : "Estimate Again", action: runEstimate)
+                    .disabled(!hasMappings)
+            }
+        }
+        if !hasMappings {
+            Text("Add an album for this account in Sync to see how big it is.").font(.caption).foregroundStyle(.secondary)
+        } else if let estimateError {
+            Text(estimateError).font(.caption).foregroundStyle(.red)
+        } else if let estimate {
+            let bytes = { (count: Int64) in ByteCountFormatter.string(fromByteCount: count, countStyle: .file) }
+            Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
+                GridRow {
+                    Text("")
+                    Text("All \(estimate.photoCount) photos").font(.caption.weight(.semibold))
+                    Text("\(estimate.pendingCount) not uploaded yet").font(.caption.weight(.semibold))
+                }
+                GridRow {
+                    Text("Originals")
+                    Text(bytes(estimate.originalBytes)).monospacedDigit()
+                    Text(bytes(estimate.pendingOriginalBytes)).monospacedDigit()
+                }
+                ForEach(estimate.rows) { row in
+                    GridRow {
+                        Text(row.quality.map { PhotoCompression.name(for: $0) } ?? "As uploaded, no compression")
+                        Text("≈ " + bytes(row.totalBytes)).monospacedDigit()
+                        Text("≈ " + bytes(row.pendingBytes)).monospacedDigit()
+                    }
+                    .fontWeight(compress && row.quality == quality ? .semibold : .regular)
+                }
+            }
+            .font(.callout)
+            Text("Compressed sizes are estimated from \(estimate.sampled) photos spread across the albums\(downsize ? ", downsized to \(size) px" : ""). A photo in more than one album counts once.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func runEstimate() {
+        estimateError = nil
+        estimating = "Starting…"
+        let account = account
+        let mappings = model.config.mappings
+        let maxPixelSize = downsize ? size : nil
+        let engine = model.engine!
+        Task {
+            let usesPhotos = mappings.contains { mapping in
+                guard mapping.accountId == account.id, case .photosAlbum = mapping.source else { return false }
+                return true
+            }
+            if usesPhotos { _ = await PhotosLibrary.requestAccess() }
+            do {
+                let result = try await Task.detached {
+                    try await engine.estimateSizes(
+                        for: account, mappings: mappings, maxPixelSize: maxPixelSize,
+                        qualities: [nil] + PhotoCompression.levels.map(\.quality),
+                        progress: { message in Task { @MainActor in if estimating != nil { estimating = message } } })
+                }.value
+                estimate = result
+            } catch {
+                estimateError = error.localizedDescription
+            }
+            estimating = nil
+        }
+    }
+
+    private var help: String {
+        switch account.service {
+        case .google:
+            return "Google Photos counts every upload against your storage. Compressing (and downsizing) makes each photo a fraction of the size; it applies to photos uploaded from now on, not ones already there."
+        case .amazon:
+            return "Amazon matches photos by their exact bytes, so leave these off there: changed copies aren't recognised as photos already in the account."
+        case .pixstar:
+            return "Pix-Star keeps small copies anyway, so downsizing makes uploads much faster."
+        case .folder:
+            return ""
+        }
+    }
+}
+
+/// The compression choices offered per account (JPEG quality).
+enum PhotoCompression {
+    struct Level { let name: String; let quality: Double }
+
+    static let levels = [
+        Level(name: "Light", quality: 0.85),
+        Level(name: "Medium", quality: 0.75),
+        Level(name: "Strong", quality: 0.6),
+    ]
+    static let standard = 0.75
+
+    /// The offered level closest to a stored quality (the config may have been edited by hand).
+    static func nearest(_ quality: Double) -> Double {
+        levels.min { abs($0.quality - quality) < abs($1.quality - quality) }?.quality ?? standard
+    }
+
+    static func name(for quality: Double) -> String {
+        levels.first { $0.quality == quality }?.name ?? "\(Int((quality * 100).rounded()))% quality"
+    }
+
+    static func label(for quality: Double) -> String {
+        let name = levels.first { $0.quality == quality }?.name.lowercased()
+        return name ?? "\(Int((quality * 100).rounded()))% quality"
     }
 }
 

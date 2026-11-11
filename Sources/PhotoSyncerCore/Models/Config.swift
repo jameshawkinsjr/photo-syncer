@@ -24,6 +24,9 @@ public enum ServiceKind: String, Codable, CaseIterable, Identifiable, Sendable {
     /// Whether the service keeps the exact bytes uploaded, so an MD5 identifies a photo.
     public var keepsOriginalBytes: Bool { self == .amazon || self == .folder }
 
+    /// Whether photos are converted to JPEG for this service (frames and Pix-Star can't all show HEIC).
+    public var uploadsAsJPEG: Bool { self == .pixstar || self == .google }
+
     /// The largest number of photos one album can usefully hold, if the service has a limit.
     /// Pix-Star frames only sync the first 3,000 photos of an album.
     public var albumPhotoLimit: Int? { self == .pixstar ? 3000 : nil }
@@ -41,31 +44,37 @@ public struct Account: Codable, Identifiable, Hashable, Sendable {
     public var signedInAs: String?
     /// Downsize photos before upload (long edge, in pixels). Pix-Star stores small copies anyway.
     public var maxPixelSize: Int?
+    /// Compress photos before upload: re-encode them as JPEG at this quality (0–1), to save
+    /// space on services that count it (Google Photos). `nil` uploads them at their own quality.
+    public var jpegQuality: Double?
 
     public init(id: UUID = UUID(), service: ServiceKind, name: String, folderPath: String? = nil,
-                signedInAs: String? = nil, maxPixelSize: Int? = nil) {
+                signedInAs: String? = nil, maxPixelSize: Int? = nil, jpegQuality: Double? = nil) {
         self.id = id
         self.service = service
         self.name = name
         self.folderPath = folderPath
         self.signedInAs = signedInAs
         self.maxPixelSize = maxPixelSize ?? (service == .pixstar ? 2048 : nil)
+        self.jpegQuality = jpegQuality
     }
 }
 
 /// Where photos come from.
 public enum SourceRef: Codable, Hashable, Sendable {
-    /// A folder on disk (for example ~/Pictures/Frames/Family). Sub-folders are included.
+    /// A folder on disk, stored relative to the home folder where possible
+    /// ("~/Pictures/Frames/Family") so the same mapping works on another Mac. Sub-folders are included.
     case folder(path: String)
-    /// An album in the Photos library, by its local identifier, with its path for display
-    /// ("Frames › Family").
-    case photosAlbum(localIdentifier: String, title: String)
+    /// An album in the Photos library, with its path for display ("Frames › Family").
+    /// `localIdentifier` only means something on the Mac that chose the album;
+    /// `cloudIdentifier` (iCloud Photos) finds the same album on another Mac.
+    case photosAlbum(localIdentifier: String, title: String, cloudIdentifier: String? = nil)
 
     public var displayName: String {
         switch self {
         case .folder(let path):
-            return (path as NSString).abbreviatingWithTildeInPath
-        case .photosAlbum(_, let title):
+            return PortablePath.display(path)
+        case .photosAlbum(_, let title, _):
             return "Photos › " + title
         }
     }
@@ -73,9 +82,51 @@ public enum SourceRef: Codable, Hashable, Sendable {
     public var shortName: String {
         switch self {
         case .folder(let path): return (path as NSString).lastPathComponent
-        case .photosAlbum(_, let title): return title.components(separatedBy: " › ").last ?? title
+        case .photosAlbum(_, let title, _): return title.components(separatedBy: " › ").last ?? title
         }
     }
+
+    /// Whether two references mean the same source, whichever Mac each was made on.
+    public func isSameSource(as other: SourceRef) -> Bool {
+        switch (self, other) {
+        case (.folder(let a), .folder(let b)):
+            return PortablePath.portable(a) == PortablePath.portable(b)
+        case (.photosAlbum(let localA, let titleA, let cloudA), .photosAlbum(let localB, let titleB, let cloudB)):
+            if localA == localB { return true }
+            if let cloudA, let cloudB { return cloudA == cloudB }
+            return titleA == titleB
+        default:
+            return false
+        }
+    }
+
+    /// For grouping mappings by source in the window.
+    public var groupKey: String {
+        switch self {
+        case .folder(let path): return "folder:" + PortablePath.portable(path)
+        case .photosAlbum(_, let title, _): return "album:" + title
+        }
+    }
+}
+
+/// Paths stored in the settings are written relative to the home folder ("~/Pictures/…"),
+/// so settings shared between Macs work whatever each Mac's user name is.
+public enum PortablePath {
+    public static func portable(_ path: String, home: String = NSHomeDirectory()) -> String {
+        let expanded = expand(path, home: home)
+        let trimmedHome = home.hasSuffix("/") ? String(home.dropLast()) : home
+        if expanded == trimmedHome { return "~" }
+        if expanded.hasPrefix(trimmedHome + "/") { return "~" + expanded.dropFirst(trimmedHome.count) }
+        return expanded
+    }
+
+    public static func expand(_ path: String, home: String = NSHomeDirectory()) -> String {
+        guard path == "~" || path.hasPrefix("~/") else { return path }
+        let trimmedHome = home.hasSuffix("/") ? String(home.dropLast()) : home
+        return trimmedHome + path.dropFirst()
+    }
+
+    public static func display(_ path: String) -> String { portable(path) }
 }
 
 /// An album (or folder) in a remote account.
@@ -138,7 +189,7 @@ public struct GoogleClientConfig: Codable, Hashable, Sendable {
     public init(clientId: String) { self.clientId = clientId }
 }
 
-/// Everything the person has set up. Saved as JSON in Application Support.
+/// Everything the person has set up. Saved as config.json in the sync data folder.
 public struct AppConfig: Codable, Sendable {
     public var accounts: [Account] = []
     public var mappings: [Mapping] = []
@@ -150,4 +201,20 @@ public struct AppConfig: Codable, Sendable {
     public init() {}
 
     public func account(_ id: UUID) -> Account? { accounts.first { $0.id == id } }
+
+    /// The same settings with every folder path written relative to the home folder.
+    public func withPortablePaths(home: String = NSHomeDirectory()) -> AppConfig {
+        var copy = self
+        for index in copy.accounts.indices {
+            if let path = copy.accounts[index].folderPath {
+                copy.accounts[index].folderPath = PortablePath.portable(path, home: home)
+            }
+        }
+        for index in copy.mappings.indices {
+            if case .folder(let path) = copy.mappings[index].source {
+                copy.mappings[index].source = .folder(path: PortablePath.portable(path, home: home))
+            }
+        }
+        return copy
+    }
 }

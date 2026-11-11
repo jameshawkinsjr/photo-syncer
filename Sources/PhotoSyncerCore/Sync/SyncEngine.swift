@@ -67,7 +67,7 @@ public final class SyncEngine: @unchecked Sendable {
     public func source(for ref: SourceRef) -> PhotoSource {
         switch ref {
         case .folder(let path): return FolderSource(path: path, md5Cache: md5Cache)
-        case .photosAlbum(let id, _): return PhotosAlbumSource(localIdentifier: id)
+        case .photosAlbum(let id, let title, let cloud): return PhotosAlbumSource(localIdentifier: id, cloudIdentifier: cloud, path: title)
         }
     }
 
@@ -80,7 +80,9 @@ public final class SyncEngine: @unchecked Sendable {
         let source = source(for: mapping.source)
         progress(SyncProgress(mappingId: mapping.id, phase: "Reading \(mapping.source.shortName)…"))
         let items = try await source.items()
-        let ledger = ledgers.load(mapping.id)
+        var ledger = ledgers.load(mapping.id)
+        // Entries recorded under a photo's Mac-only id move to its iCloud id.
+        if ledger.reconcile(items) > 0 { try ledgers.save(ledger, for: mapping.id) }
         let fresh = items.filter { !ledger.contains($0.key) }
         if fresh.isEmpty {
             return SyncPlanner.plan(items: items, ledger: ledger, remote: [], md5: { _ in nil })
@@ -111,6 +113,12 @@ public final class SyncEngine: @unchecked Sendable {
                      progress: @escaping @Sendable (SyncProgress) -> Void) async -> SyncOutcome {
         do {
             var mapping = mapping
+            // Remember the album's iCloud id, so other Macs sharing the settings can find it.
+            if case .photosAlbum(let local, let title, nil) = mapping.source,
+               let cloud = PhotosAlbumSource(localIdentifier: local, path: title).albumCloudIdentifier() {
+                mapping.source = .photosAlbum(localIdentifier: local, title: title, cloudIdentifier: cloud)
+                updateMapping(mapping)
+            }
             let plan = try await plan(mapping, account: account, progress: progress)
             var ledger = ledgers.load(mapping.id)
 
@@ -182,7 +190,8 @@ public final class SyncEngine: @unchecked Sendable {
                 queue = queue.dropFirst(take)
                 let batches = stride(from: 0, to: chunk.count, by: batchSize).map { Array(chunk[$0..<min($0 + batchSize, chunk.count)]) }
 
-                let preferJPEG = account.service == .pixstar || account.service == .google
+                let imageOptions = ImageOptions(maxPixelSize: account.maxPixelSize, jpegQuality: account.jpegQuality,
+                                                preferJPEG: account.service.uploadsAsJPEG)
                 let results = await withTaskGroup(of: [(SourceItem, Result<UploadResult, Error>)].self) { group in
                     for batch in batches {
                         group.addTask {
@@ -191,7 +200,7 @@ public final class SyncEngine: @unchecked Sendable {
                             var out: [(SourceItem, Result<UploadResult, Error>)] = []
                             for item in batch {
                                 do {
-                                    payloads.append(try await source.payload(for: item, maxPixelSize: account.maxPixelSize, preferJPEG: preferJPEG))
+                                    payloads.append(try await source.payload(for: item, options: imageOptions))
                                     prepared.append(item)
                                 } catch {
                                     out.append((item, .failure(error)))
@@ -249,6 +258,7 @@ public final class SyncEngine: @unchecked Sendable {
     public func markAllSynced(_ mapping: Mapping) async throws -> Int {
         let items = try await source(for: mapping.source).items()
         var ledger = ledgers.load(mapping.id)
+        ledger.reconcile(items)
         var added = 0
         for item in items where !ledger.contains(item.key) {
             ledger.record(item.key, .init(how: .markedSynced))
@@ -323,10 +333,13 @@ public final class SyncLog: @unchecked Sendable {
 
     public init(directory: URL) { self.directory = directory }
 
+    /// Today's log for this Mac: "2026-11-09 (Sam's MacBook Pro).log". One file per Mac, so
+    /// Macs sharing the data folder never write to the same file.
     public var todayURL: URL {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
-        return directory.appendingPathComponent("\(formatter.string(from: Date())).log")
+        let mac = ThisMac.name.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-")
+        return directory.appendingPathComponent("\(formatter.string(from: Date())) (\(mac)).log")
     }
 
     public func write(_ line: String) {

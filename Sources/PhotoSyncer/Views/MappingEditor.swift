@@ -118,16 +118,19 @@ struct MappingEditor: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
-        panel.directoryURL = URL(fileURLWithPath: folderPath)
+        panel.directoryURL = URL(fileURLWithPath: PortablePath.expand(folderPath))
         if panel.runModal() == .OK, let url = panel.url { folderPath = url.path }
     }
 
     private var source: SourceRef? {
         switch sourceKind {
         case .photos:
-            return selectedAlbum.map { .photosAlbum(localIdentifier: $0.id, title: $0.path) }
+            return selectedAlbum.map { album in
+                .photosAlbum(localIdentifier: album.id, title: album.path,
+                             cloudIdentifier: PhotosLibrary.cloudIdentifiers(for: [album.id])[album.id])
+            }
         case .folder:
-            return folderPath.isEmpty ? nil : .folder(path: folderPath)
+            return folderPath.isEmpty ? nil : .folder(path: PortablePath.portable(folderPath))
         }
     }
 
@@ -248,10 +251,12 @@ struct MappingEditor: View {
         switch mapping.source {
         case .folder(let path):
             sourceKind = .folder
-            folderPath = path
-        case .photosAlbum(let id, let title):
+            folderPath = PortablePath.expand(path)
+        case .photosAlbum(let id, let title, let cloud):
             sourceKind = .photos
-            selectedAlbum = find(id) ?? PhotosAlbumNode(id: id, title: title, path: title, count: nil, children: nil)
+            // The album may have been chosen on another Mac: find it by iCloud id or path.
+            let here = photosAllowed ? PhotosLibrary.resolveAlbum(localIdentifier: id, cloudIdentifier: cloud, path: title)?.localIdentifier : nil
+            selectedAlbum = here.flatMap(find) ?? PhotosAlbumNode(id: id, title: title, path: title, count: nil, children: nil)
         }
         accountId = mapping.accountId
         selectedDestination = mapping.destination
@@ -260,7 +265,8 @@ struct MappingEditor: View {
     private func commit() {
         guard let source, let accountId, let selectedDestination else { return }
         var result = mapping ?? Mapping(source: source, accountId: accountId, destination: selectedDestination)
-        let changedTarget = result.accountId != accountId || result.destination.id != selectedDestination.id || result.source != source
+        let changedTarget = result.accountId != accountId || result.destination.id != selectedDestination.id
+            || !result.source.isSameSource(as: source)
         result.source = source
         result.accountId = accountId
         result.destination = selectedDestination

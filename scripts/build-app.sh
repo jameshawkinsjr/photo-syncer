@@ -9,8 +9,9 @@
 # Environment (see scripts/common.sh):
 #   CODESIGN_IDENTITY   Signing identity to use. Defaults to the first
 #                       "Developer ID Application" certificate in your keychain,
-#                       then the first "Apple Development" one, or ad-hoc ("-")
-#                       if there is neither.
+#                       then the first "Apple Development" one, then
+#                       "Photo Syncer Local Signing" (scripts/make-signing-cert.sh),
+#                       or ad-hoc ("-") if there is none.
 #   BUNDLE_ID           Bundle identifier (default: com.photosyncer.PhotoSyncer).
 #   VERSION             Version string (default: 1.0.0).
 #

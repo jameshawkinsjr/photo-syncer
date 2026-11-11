@@ -11,7 +11,7 @@ public struct FolderDestinationService: RemoteService {
     public let root: URL
 
     public init(path: String) {
-        root = URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
+        root = URL(fileURLWithPath: PortablePath.expand(path), isDirectory: true)
     }
 
     public func verify() async throws -> String? {

@@ -31,12 +31,39 @@ public struct Ledger: Codable, Sendable {
     }
 
     public var entries: [String: Entry] = [:]
+    /// Keys renamed away since loading, so a merge on save doesn't bring them back.
+    var removed: Set<String> = []
+
+    enum CodingKeys: String, CodingKey { case entries }
 
     public init() {}
 
     public func contains(_ key: String) -> Bool { entries[key] != nil }
 
-    public mutating func record(_ key: String, _ entry: Entry) { entries[key] = entry }
+    public mutating func record(_ key: String, _ entry: Entry) {
+        entries[key] = entry
+        removed.remove(key)
+    }
+
+    /// Moves an entry to a new key (a photo's Mac-only id to its iCloud id).
+    public mutating func rename(_ oldKey: String, to newKey: String) {
+        guard oldKey != newKey, let entry = entries.removeValue(forKey: oldKey) else { return }
+        removed.insert(oldKey)
+        if entries[newKey] == nil { entries[newKey] = entry }
+    }
+
+    /// Re-keys entries recorded under one of an item's other ids. Returns how many changed.
+    @discardableResult
+    public mutating func reconcile(_ items: [SourceItem]) -> Int {
+        var changed = 0
+        for item in items where !contains(item.key) {
+            if let alias = item.aliases.first(where: contains) {
+                rename(alias, to: item.key)
+                changed += 1
+            }
+        }
+        return changed
+    }
 
     public var count: Int { entries.count }
 
@@ -61,8 +88,14 @@ public struct LedgerStore: Sendable {
         return (try? JSONDecoder.syncer.decode(Ledger.self, from: data)) ?? Ledger()
     }
 
+    /// Saves a ledger, merged with what's on disk: entries another Mac added since this one
+    /// loaded the file are kept, so two Macs syncing the same mapping never lose each other's work.
     public func save(_ ledger: Ledger, for mappingId: UUID) throws {
-        try JSONEncoder.syncer.encode(ledger).write(to: url(mappingId), options: .atomic)
+        var merged = ledger
+        for (key, entry) in load(mappingId).entries where merged.entries[key] == nil && !ledger.removed.contains(key) {
+            merged.entries[key] = entry
+        }
+        try JSONEncoder.syncer.encode(merged).write(to: url(mappingId), options: .atomic)
     }
 
     public func delete(_ mappingId: UUID) {

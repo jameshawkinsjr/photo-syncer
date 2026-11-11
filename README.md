@@ -27,6 +27,8 @@ Photos › Frames › Family ──┬──▶ Amazon Photos / Family
   accounts per service as you like (for example two Pix-Star frames).
 - Pushes only what's new, remembered per mapping; finds photos already in the destination on
   the first sync so nothing is uploaded twice.
+- One setup shared by several Macs: keep the sync data in iCloud Drive, Dropbox or a shared
+  drive, and every Mac knows what's already been synced.
 - Pix-Star's 3,000-photos-per-album limit is handled by rolling over into `<album> 2`, `<album> 3`, ….
 - Pix-Star album backup, with a list of the photos that aren't in a local folder.
 - Never deletes anything from a service.
@@ -45,7 +47,11 @@ it and choose **Open** the first time.
    own sign-in.
 2. **Sync › +**: pick a source (a Photos album, or a folder and its sub-folders), an
    account, and an album there, or create a new album.
-3. **Sync All** (⇧⌘S). Each row shows what happened; the **Log** has the details.
+3. Optional: **Settings…** in an account's ⋯ menu can downsize photos to a longest side
+   and compress them (Light, Medium or Strong JPEG compression) before they're uploaded, per
+   account. **Estimate Sizes** there adds up the albums that account syncs and shows roughly
+   how big they'd be at each level. Settings apply to photos uploaded from then on.
+4. **Sync All** (⇧⌘S). Each row shows what happened; the **Log** has the details.
 
 ### What counts as "new"
 
@@ -73,7 +79,7 @@ when the service was filled from exported copies).
 | --- | --- | --- |
 | Amazon Photos | The web API amazon.com/photos uses, with the in-app sign-in's cookies | Albums made from a folder ("smart" albums) are filled by uploading into the folder. Other albums get a `Photo Syncer/<album>` folder. Originals are uploaded untouched. |
 | Pix-Star | pix-star.com's web-album pages and uploader, with the in-app sign-in's cookies | **A frame syncs at most 3,000 photos per album.** When an album is full, Photo Syncer creates `<album> 2`, `<album> 3`, … and carries on; add those to the frame's slideshow. Photos are downsized to 2048 px before upload (Pix-Star keeps small copies anyway); change it per account. Albums managed by a multi-frame account can only be uploaded to from that account. **Back Up an Album…** downloads an album to disk and sets aside the photos that have no match in a local folder. |
-| Google Photos | The official Photos Library API | Since March 2025 apps can only add to **albums they created**, so create the album from Photo Syncer and pick it on the frame. Needs your own OAuth client (below). |
+| Google Photos | The official Photos Library API | Since March 2025 apps can only add to **albums they created**, so create the album from Photo Syncer and pick it on the frame. Needs your own OAuth client (below). Uploads count against your Google storage: turn on **Compress photos** (and downsizing) in the account's settings to upload smaller copies. |
 | Folder | Copies files | One sub-folder per album, plus `index.json` (newest first) so a dashboard can read one file. |
 
 Amazon and Pix-Star have no public API; if either changes its website, uploads may stop
@@ -105,18 +111,52 @@ the mapping editor (**Create**), then choose it on your frame.
 
 ## Where things are kept
 
-`~/Library/Application Support/Photo Syncer/`:
+**Sync data** (default `~/Documents/Photo Syncer`, changeable in **Settings**):
 
 | File | What |
 | --- | --- |
 | `config.json` | Accounts, mappings, settings |
 | `ledger/<mapping>.json` | What each mapping has pushed |
+| `logs/<date> (<Mac>).log` | One log per day per Mac |
+| `sync.lock` | Which Mac is syncing right now (only while it syncs) |
+
+**This Mac only** (`~/Library/Application Support/Photo Syncer/`):
+
+| File | What |
+| --- | --- |
+| `location.json` | Where the sync data folder is |
 | `secrets.json` (mode 0600) | Google client secret and tokens |
 | `md5-cache.json` | MD5s of source files, by path, size and date |
-| `logs/<date>.log` | One log per day |
 
-Amazon and Pix-Star sign-ins live in WebKit's per-account data stores, and are removed with
-the account. Set `PHOTO_SYNCER_HOME=<folder>` to run the app against other settings.
+Amazon and Pix-Star sign-ins live in WebKit's per-account data stores on each Mac, and are
+removed with the account. The whole sync data folder is about 1 MB for ten thousand photos.
+
+### Using it on more than one Mac
+
+1. On the first Mac, **Settings › Sync Data › Change…** and choose a folder every Mac can
+   reach (iCloud Drive, Dropbox, a shared drive). The settings and history move there.
+2. On each other Mac, install Photo Syncer, choose the same folder, and pick **Use the
+   Settings There**. Then sign in to each account once (sign-ins aren't shared), and for
+   Google, paste the client ID and secret into Google Photos setup again.
+
+What makes this work:
+
+- **Photos are recognised by their iCloud Photos id**, which is the same on every Mac using
+  the library, so a photo synced from one Mac counts as synced on the others. Albums are found
+  by iCloud id too, falling back to their path ("Frames › Family"). Without iCloud Photos, a
+  Photos album's history only applies to the Mac that synced it (**Settings** says which).
+- **Folder paths are stored relative to your home folder** (`~/Pictures/Frames`), so they work
+  on a Mac with a different user name, as long as the folder is in the same place.
+- **One Mac syncs at a time.** The syncing Mac writes `sync.lock` and touches it every minute;
+  another Mac that tries to sync is told who's syncing, and can sync anyway (for a lock left by
+  a Mac that crashed). A lock untouched for 10 minutes is ignored. With a cloud-synced folder
+  the lock takes as long as the folder does to appear on the other Mac, so the ledgers also
+  merge when saved: neither Mac can drop the other's progress.
+- Settings changed on one Mac are picked up by the others when their window comes forward
+  or they start a sync.
+
+Set `PHOTO_SYNCER_HOME=<folder>` to run the app with everything (sync data and this Mac's
+files) in one throwaway folder.
 
 ## Building
 
@@ -127,12 +167,14 @@ Needs the Xcode Command Line Tools (Xcode itself is optional) and macOS 14 or la
 | `scripts/test.sh` | Runs the tests (Swift Testing). |
 | `scripts/build-app.sh [--install] [--open]` | Builds `build/Photo Syncer.app`, optionally installs or opens it. |
 | `scripts/make-dmg.sh` | Builds the app and `build/Photo-Syncer-<version>.dmg`. Arranging the DMG window needs permission to control Finder (asked once). |
+| `scripts/make-signing-cert.sh` | Once per Mac without an Apple certificate: adds a self-signed code-signing certificate to your login keychain, so the Photos permission survives rebuilds. |
 
 With only the Command Line Tools, the macOS 27 SDK's SwiftUI needs a macro plugin that ships
 with Xcode, so the scripts build against the newest macOS 26 SDK instead (`choose_sdk` in
 `scripts/common.sh`). Signing uses a Developer ID or Apple Development certificate if the
-keychain has one, else ad hoc; with ad hoc signing macOS asks for Photos access again after
-each rebuild.
+keychain has one, then the self-signed one `scripts/make-signing-cert.sh` creates, else ad hoc.
+With ad hoc signing macOS asks for Photos access again after each rebuild; run
+`scripts/make-signing-cert.sh` once to keep the permission across rebuilds.
 
 `PHOTO_SYNCER_SNAPSHOT=<folder>` makes the app draw each pane (and the Sync pane after
 syncing everything) into PNGs and quit, for checking the UI from a script.
@@ -145,7 +187,10 @@ syncing everything) into PNGs and quit, for checking the UI from a script.
   - `Services/`: one client per service, behind `RemoteService`.
   - `Sync/SyncPlanner.swift`: what's new, matched, or to upload (pure, tested).
   - `Sync/SyncEngine.swift`: runs a mapping, Pix-Star overflow, backups, the log.
-- `Sources/PhotoSyncer`: the SwiftUI app, in-app sign-in (`Auth/WebSessions.swift`), Google OAuth hand-off.
+  - `Store/`: where files live (`Storage`: sync data folder versus this Mac's folder, moving
+    between them, the `SyncLock`), and the per-mapping `Ledger` (merged on save).
+- `Sources/PhotoSyncer`: the SwiftUI app, in-app sign-in (`Auth/WebSessions.swift`), Google OAuth hand-off,
+  Settings (`Views/SettingsView.swift`).
 - `Tests/PhotoSyncerCoreTests`: matching, page and response parsing (fixtures modelled on
   pix-star.com markup and Amazon responses, with made-up ids), the engine end to end against a
   fake service.

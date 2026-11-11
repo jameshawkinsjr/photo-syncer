@@ -113,4 +113,12 @@ struct GoogleTests {
         let payload = Data(#"{"email":"someone@example.com","sub":"1"}"#.utf8).base64URLEncoded
         #expect(GoogleOAuth.emailFromIDToken("eyJhbGciOiJSUzI1NiJ9.\(payload).sig") == "someone@example.com")
     }
+
+    @Test func endpointsWithAColonKeepTheHost() {
+        #expect(GooglePhotosService.endpoint("mediaItems:search").absoluteString
+                == "https://photoslibrary.googleapis.com/v1/mediaItems:search")
+        #expect(GooglePhotosService.endpoint("mediaItems:batchCreate").host == "photoslibrary.googleapis.com")
+        #expect(GooglePhotosService.endpoint("albums?pageSize=1").absoluteString
+                == "https://photoslibrary.googleapis.com/v1/albums?pageSize=1")
+    }
 }

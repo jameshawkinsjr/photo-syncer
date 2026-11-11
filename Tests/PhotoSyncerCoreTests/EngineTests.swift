@@ -83,10 +83,25 @@ func makeImage(width: Int, height: Int, shade: Int) -> CGImage {
     return context.makeImage()!
 }
 
-func encode(_ image: CGImage, as type: UTType) -> Data {
+/// An image with per-pixel noise, which (like a real photo) doesn't compress to almost nothing.
+func makeNoisyImage(width: Int, height: Int) -> CGImage {
+    var generator = SystemRandomNumberGenerator()
+    var pixels = [UInt8](repeating: 255, count: width * height * 4)
+    for index in stride(from: 0, to: pixels.count, by: 4) {
+        pixels[index] = UInt8.random(in: 0...255, using: &generator)
+        pixels[index + 1] = UInt8.random(in: 0...255, using: &generator)
+        pixels[index + 2] = UInt8.random(in: 0...255, using: &generator)
+    }
+    let context = CGContext(data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+                            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+    return context.makeImage()!
+}
+
+func encode(_ image: CGImage, as type: UTType, quality: Double? = nil) -> Data {
     let data = NSMutableData()
     let destination = CGImageDestinationCreateWithData(data, type.identifier as CFString, 1, nil)!
-    CGImageDestinationAddImage(destination, image, nil)
+    let properties = quality.map { [kCGImageDestinationLossyCompressionQuality: $0] as CFDictionary }
+    CGImageDestinationAddImage(destination, image, properties)
     CGImageDestinationFinalize(destination)
     return data as Data
 }
@@ -228,10 +243,71 @@ struct ImageAndFolderTests {
         try sandbox.addPhoto("big.jpg", shade: 1, size: 3000)
         let source = FolderSource(path: sandbox.source.path, md5Cache: MD5Cache(url: sandbox.storage.md5CacheURL))
         let item = try await source.items()[0]
-        let original = try await source.payload(for: item, maxPixelSize: nil, preferJPEG: false)
+        let original = try await source.payload(for: item, options: ImageOptions())
         #expect(original.md5 == (try source.originalMD5(of: item)), "untouched bytes keep the file's MD5")
-        let small = try await source.payload(for: item, maxPixelSize: 1000, preferJPEG: true)
+        let small = try await source.payload(for: item, options: ImageOptions(maxPixelSize: 1000, preferJPEG: true))
         #expect(ImageProcessing.pixelSize(of: small.data) == CGSize(width: 1000, height: 750))
+    }
+
+    @Test func compressionShrinksPhotosWithoutResizingThem() throws {
+        let original = encode(makeNoisyImage(width: 800, height: 600), as: .jpeg, quality: 1.0)
+        let compressed = try #require(try ImageProcessing.prepare(original, options: ImageOptions(jpegQuality: 0.6)))
+        #expect(compressed.count < original.count / 2)
+        #expect(ImageProcessing.pixelSize(of: compressed) == CGSize(width: 800, height: 600))
+    }
+
+    @Test func compressionKeepsTheOriginalWhenItIsAlreadySmaller() throws {
+        let original = encode(makeNoisyImage(width: 400, height: 300), as: .jpeg, quality: 0.3)
+        #expect(try ImageProcessing.prepare(original, options: ImageOptions(jpegQuality: 0.85)) == nil)
+        #expect(try ImageProcessing.prepare(original, options: ImageOptions()) == nil, "nothing asked, nothing changed")
+        // Converting still happens when it's needed, whatever the size.
+        let png = encode(makeNoisyImage(width: 400, height: 300), as: .png)
+        let converted = try #require(try ImageProcessing.prepare(png, options: ImageOptions(jpegQuality: 0.85, preferJPEG: true)))
+        #expect(ImageProcessing.isJPEG(converted))
+    }
+
+    @Test func folderSourceCompressesWhenAsked() async throws {
+        let sandbox = try Sandbox()
+        let url = sandbox.source.appendingPathComponent("photo.jpg")
+        try encode(makeNoisyImage(width: 800, height: 600), as: .jpeg, quality: 1.0).write(to: url)
+        let source = FolderSource(path: sandbox.source.path, md5Cache: MD5Cache(url: sandbox.storage.md5CacheURL))
+        let item = try await source.items()[0]
+        let payload = try await source.payload(for: item, options: ImageOptions(maxPixelSize: 2048, jpegQuality: 0.6, preferJPEG: true))
+        #expect(payload.data.count < (try Data(contentsOf: url)).count / 2)
+        #expect(payload.fileName == "photo.jpg")
+        #expect(payload.mimeType == "image/jpeg")
+    }
+
+    @Test func sizeEstimateCoversAnAccountsAlbums() async throws {
+        let sandbox = try Sandbox()
+        var total: Int64 = 0
+        for index in 0..<4 {
+            let url = sandbox.source.appendingPathComponent("photo \(index).jpg")
+            let data = encode(makeNoisyImage(width: 600, height: 400), as: .jpeg, quality: 1.0)
+            try data.write(to: url)
+            total += Int64(data.count)
+        }
+        let engine = SyncEngine(storage: sandbox.storage, serviceFactory: { _ in FakeService() },
+                                log: SyncLog(directory: sandbox.storage.logsDirectory))
+        let account = Account(service: .google, name: "Google")
+        let other = Account(service: .pixstar, name: "Frame")
+        let mapping = Mapping(source: .folder(path: sandbox.source.path), accountId: account.id,
+                              destination: DestinationRef(id: "a", name: "Family"))
+        // The same folder twice for this account, and once for another account: each photo counts once.
+        let again = Mapping(source: .folder(path: sandbox.source.path), accountId: account.id,
+                            destination: DestinationRef(id: "b", name: "Family too"))
+        let elsewhere = Mapping(source: .folder(path: sandbox.source.path), accountId: other.id,
+                                destination: DestinationRef(id: "c", name: "Frame"))
+        let estimate = try await engine.estimateSizes(for: account, mappings: [mapping, again, elsewhere],
+                                                      maxPixelSize: nil, qualities: [nil, 0.85, 0.6], sampleSize: 2)
+        #expect(estimate.photoCount == 4)
+        #expect(estimate.pendingCount == 4)
+        #expect(estimate.originalBytes == total)
+        #expect(estimate.sampled == 2)
+        #expect(estimate.rows.map(\.quality) == [nil, 0.85, 0.6])
+        #expect(estimate.rows[0].totalBytes == total, "JPEGs that don't need changing go up as they are")
+        #expect(estimate.rows[2].totalBytes < estimate.rows[1].totalBytes)
+        #expect(estimate.rows[2].totalBytes < total / 2)
     }
 
     @Test func folderDestinationCopiesAndIndexes() async throws {
@@ -257,6 +333,7 @@ struct ImageAndFolderTests {
         try sandbox.storage.saveConfig(config)
         let loaded = sandbox.storage.loadConfig()
         #expect(loaded.accounts.first?.maxPixelSize == 2048, "Pix-Star uploads are downsized by default")
+        #expect(loaded.accounts.first?.jpegQuality == nil, "photos aren't compressed unless asked")
         #expect(loaded.mappings.first?.source.shortName == "Family")
         #expect(loaded.mappings.first?.destination.addsToAlbum == false)
     }

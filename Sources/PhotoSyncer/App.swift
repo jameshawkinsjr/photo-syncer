@@ -34,13 +34,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum Pane: String, Hashable, CaseIterable {
-    case sync, accounts, log
+    case sync, accounts, log, settings
 
     var title: String {
         switch self {
         case .sync: return "Sync"
         case .accounts: return "Accounts"
         case .log: return "Log"
+        case .settings: return "Settings"
         }
     }
 
@@ -49,6 +50,7 @@ enum Pane: String, Hashable, CaseIterable {
         case .sync: return "arrow.triangle.2.circlepath"
         case .accounts: return "person.2"
         case .log: return "list.bullet.rectangle"
+        case .settings: return "gearshape"
         }
     }
 }
@@ -67,6 +69,7 @@ struct ContentView: View {
             case .sync: SyncView()
             case .accounts: AccountsView()
             case .log: LogView()
+            case .settings: SettingsView()
             }
         }
         .toolbar {
@@ -84,6 +87,12 @@ struct ContentView: View {
             }
         }
         .task { await SnapshotMode.runIfRequested(model) }
+        .alert(item: $model.lockConflict) { conflict in
+            Alert(title: Text("Another Mac is syncing"),
+                  message: Text("\(conflict.holder.mac) started syncing \(conflict.holder.started.formatted(date: .omitted, time: .shortened)) and is still going. Syncing from two Macs at once can upload photos twice. If that Mac crashed or is asleep, sync anyway."),
+                  primaryButton: .default(Text("Wait")),
+                  secondaryButton: .destructive(Text("Sync Anyway")) { model.syncAnyway(conflict) })
+        }
         .sheet(item: $model.signingIn) { account in
             SignInView(account: account) { _ in
                 model.signingIn = nil

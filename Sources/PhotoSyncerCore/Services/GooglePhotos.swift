@@ -14,14 +14,20 @@ public final class GooglePhotosService: RemoteService, @unchecked Sendable {
 
     let http = HTTPClient()
     let tokens: GoogleTokenSource
-    let api = URL(string: "https://photoslibrary.googleapis.com/v1/")!
+    static let api = "https://photoslibrary.googleapis.com/v1/"
 
     public init(tokens: GoogleTokenSource) {
         self.tokens = tokens
     }
 
+    /// Joined as text: `URL(string:relativeTo:)` would read "mediaItems:" in
+    /// "mediaItems:search" as a URL scheme and drop the host ("unsupported URL").
+    static func endpoint(_ path: String) -> URL {
+        URL(string: api + path)!
+    }
+
     private func request(_ path: String, method: String = "GET", json: Any? = nil) async throws -> URLRequest {
-        var request = URLRequest(url: URL(string: path, relativeTo: api)!.absoluteURL)
+        var request = URLRequest(url: Self.endpoint(path))
         request.httpMethod = method
         request.setValue("Bearer \(try await tokens.accessToken())", forHTTPHeaderField: "Authorization")
         if let json {
