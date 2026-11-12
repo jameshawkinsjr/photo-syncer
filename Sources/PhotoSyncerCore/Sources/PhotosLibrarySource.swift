@@ -223,9 +223,31 @@ public struct PhotosAlbumSource: PhotoSource {
         // Frames and Pix-Star can't all show HEIC, so photos go up as JPEG.
         var options = options
         options.preferJPEG = true
-        if let jpeg = try ImageProcessing.prepare(data, options: options) {
-            return UploadPayload(data: jpeg, fileName: NameMatching.uploadName(base: base, ext: "jpg"), mimeType: "image/jpeg")
-        }
-        return UploadPayload(data: data, fileName: NameMatching.uploadName(base: base, ext: "jpg"), mimeType: "image/jpeg")
+        let jpeg = try ImageProcessing.prepare(data, options: options) ?? data
+        return UploadPayload(data: try Self.withLibraryDate(jpeg, item.date),
+                             fileName: NameMatching.uploadName(base: base, ext: "jpg"), mimeType: "image/jpeg")
+    }
+
+    /// Photos shows the date in its library, which a photo's file may not have: scans, photos
+    /// saved from messages, or dates adjusted in Photos. Services date photos by the file (Google
+    /// can't be told a date any other way), so the library's date is written into the copy
+    /// uploaded when the file's is missing or different.
+    static func withLibraryDate(_ data: Data, _ date: Date?) throws -> Data {
+        guard let date else { return data }
+        let fileDate = ImageProcessing.captureDate(of: data)
+        guard ImageProcessing.needsCaptureDate(file: fileDate, library: date) else { return data }
+        // Keep the photo's own time zone when it records one.
+        let zone = fileDate.flatMap { _ in Self.offsetZone(of: data) } ?? .current
+        return try ImageProcessing.settingCaptureDate(data, to: date, timeZone: zone)
+    }
+
+    private static func offsetZone(of data: Data) -> TimeZone? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any],
+              let text = exif[kCGImagePropertyExifOffsetTimeOriginal] as? String else { return nil }
+        let parts = text.dropFirst().split(separator: ":").compactMap { Int($0) }
+        guard let sign = text.first, sign == "+" || sign == "-", parts.count == 2 else { return nil }
+        return TimeZone(secondsFromGMT: (sign == "-" ? -1 : 1) * (parts[0] * 3600 + parts[1] * 60))
     }
 }

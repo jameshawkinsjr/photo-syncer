@@ -50,6 +50,8 @@ public protocol RemoteService: Sendable {
     var kind: ServiceKind { get }
     /// How many photos `upload` takes at once.
     var preferredBatchSize: Int { get }
+    /// How many `upload` calls may run at the same time.
+    var maxParallelUploads: Int { get }
 
     /// Checks the sign-in and returns who is signed in, if the service says.
     func verify() async throws -> String?
@@ -63,6 +65,8 @@ public protocol RemoteService: Sendable {
 }
 
 extension RemoteService {
+    public var maxParallelUploads: Int { 3 }
+
     public func download(_ item: RemoteItem) async throws -> (Data, String) {
         throw SyncError.unexpected("\(kind.displayName) doesn't support downloading yet.")
     }

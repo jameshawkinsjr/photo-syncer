@@ -83,6 +83,11 @@ public final class SyncEngine: @unchecked Sendable {
         var ledger = ledgers.load(mapping.id)
         // Entries recorded under a photo's Mac-only id move to its iCloud id.
         if ledger.reconcile(items) > 0 { try ledgers.save(ledger, for: mapping.id) }
+        let released = ledger.releaseSharedMatches()
+        if released > 0 {
+            try ledgers.save(ledger, for: mapping.id)
+            log.write("\(mapping.source.displayName) → \(mapping.destination.name): \(released) photos had been matched to a different photo with the same name; they'll be uploaded")
+        }
         let fresh = items.filter { !ledger.contains($0.key) }
         if fresh.isEmpty {
             return SyncPlanner.plan(items: items, ledger: ledger, remote: [], md5: { _ in nil })
@@ -157,7 +162,7 @@ public final class SyncEngine: @unchecked Sendable {
             log.write("\(label(mapping, account)): uploading \(total) photos")
 
             let batchSize = max(1, service.preferredBatchSize)
-            let parallel = limit == nil ? 3 : 1
+            let parallel = limit == nil ? max(1, service.maxParallelUploads) : 1
             var queue = plan.toUpload[...]
 
             while !queue.isEmpty {

@@ -22,7 +22,9 @@ public enum SyncPlanner {
     ///
     /// A remote photo matches a source photo with the same MD5 (when both are known) or else
     /// the same comparable name. Each remote photo matches at most one source photo, so two
-    /// different "IMG_0001.jpg"s from different folders both still get uploaded once.
+    /// different "IMG_0001.jpg"s from different folders both still get uploaded once, and a
+    /// remote photo the ledger already holds for another source photo is never matched again
+    /// (a camera's file names repeat, so a new "IMG_1234" isn't the old one).
     public static func plan(items: [SourceItem], ledger: Ledger, remote: [RemoteItem],
                             md5: (SourceItem) -> String?) -> SyncPlan {
         var plan = SyncPlan(sourceCount: items.count)
@@ -36,7 +38,10 @@ public enum SyncPlanner {
             if let md5 = item.md5 { byMD5[md5, default: []].append(item) }
             if !item.nameKey.isEmpty { byName[item.nameKey, default: []].append(item) }
         }
-        var used = Set<String>()
+        var used = Set(ledger.entries.values.compactMap(\.remoteId))
+        // Entries without an id (older ones) still claim their remote photo by name.
+        let claimedNames = Set(ledger.entries.values.filter { $0.remoteId == nil }.compactMap(\.remoteName))
+        for item in remote where item.md5 == nil && claimedNames.contains(item.name) { used.insert(item.id) }
 
         func take(_ candidates: [RemoteItem]?) -> RemoteItem? {
             guard let found = candidates?.first(where: { !used.contains($0.id) }) else { return nil }

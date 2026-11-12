@@ -101,6 +101,81 @@ public enum ImageProcessing {
         return output as Data
     }
 
+    // MARK: Capture date
+
+    /// The date a photo was taken, as written in its EXIF. With an offset (`OffsetTimeOriginal`)
+    /// it's an exact moment; without one it's a wall-clock time read as if it were UTC.
+    public struct CaptureDate: Sendable, Equatable {
+        public var date: Date
+        public var hasOffset: Bool
+    }
+
+    public static func captureDate(of data: Data) -> CaptureDate? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any],
+              let text = exif[kCGImagePropertyExifDateTimeOriginal] as? String,
+              let wallClock = exifFormatter(TimeZone(secondsFromGMT: 0)!).date(from: text) else { return nil }
+        if let offset = (exif[kCGImagePropertyExifOffsetTimeOriginal] as? String).flatMap(offsetSeconds) {
+            return CaptureDate(date: wallClock.addingTimeInterval(TimeInterval(-offset)), hasOffset: true)
+        }
+        return CaptureDate(date: wallClock, hasOffset: false)
+    }
+
+    /// Whether a photo's file needs the date the library shows for it: the file has no date, or
+    /// one that's clearly different (a scan's scan date, a date fixed in Photos afterwards).
+    /// Without an offset the file's time could be in any time zone, so only a gap of more than
+    /// 14 hours counts.
+    public static func needsCaptureDate(file: CaptureDate?, library: Date) -> Bool {
+        guard let file else { return true }
+        let gap = abs(file.date.timeIntervalSince(library))
+        return gap > (file.hasOffset ? 60 : 14 * 3600 + 60)
+    }
+
+    /// The same image with `date` written as when it was taken (EXIF and TIFF dates, with the
+    /// time zone offset), so services that read the file (Google Photos, Amazon) date it right.
+    /// The pixels aren't re-encoded.
+    public static func settingCaptureDate(_ data: Data, to date: Date, timeZone: TimeZone = .current) throws -> Data {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let type = CGImageSourceGetType(source) else { throw Failure.unreadable }
+        let stamp = exifFormatter(timeZone).string(from: date) as CFString
+        let seconds = timeZone.secondsFromGMT(for: date)
+        let offset = String(format: "%@%02d:%02d", seconds < 0 ? "-" : "+", abs(seconds) / 3600, abs(seconds) % 3600 / 60) as CFString
+
+        let metadata = CGImageMetadataCreateMutable()
+        let values: [(CFString, CFString, CFString)] = [
+            (kCGImagePropertyExifDictionary, kCGImagePropertyExifDateTimeOriginal, stamp),
+            (kCGImagePropertyExifDictionary, kCGImagePropertyExifDateTimeDigitized, stamp),
+            (kCGImagePropertyExifDictionary, kCGImagePropertyExifOffsetTimeOriginal, offset),
+            (kCGImagePropertyExifDictionary, kCGImagePropertyExifOffsetTimeDigitized, offset),
+            (kCGImagePropertyTIFFDictionary, kCGImagePropertyTIFFDateTime, stamp),
+        ]
+        for (dictionary, key, value) in values {
+            guard CGImageMetadataSetValueMatchingImageProperty(metadata, dictionary, key, value) else { throw Failure.encodeFailed }
+        }
+        let output = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(output, type, 1, nil) else { throw Failure.encodeFailed }
+        let options: [CFString: Any] = [kCGImageDestinationMetadata: metadata, kCGImageDestinationMergeMetadata: true]
+        // Copies the image as it is, only changing its metadata (no Finalize with this call).
+        guard CGImageDestinationCopyImageSource(destination, source, options as CFDictionary, nil) else { throw Failure.encodeFailed }
+        return output as Data
+    }
+
+    private static func exifFormatter(_ timeZone: TimeZone) -> DateFormatter {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        return formatter
+    }
+
+    /// "+02:00" -> 7200.
+    private static func offsetSeconds(_ text: String) -> Int? {
+        let parts = text.dropFirst().split(separator: ":").compactMap { Int($0) }
+        guard let sign = text.first, sign == "+" || sign == "-", parts.count == 2 else { return nil }
+        return (sign == "-" ? -1 : 1) * (parts[0] * 3600 + parts[1] * 60)
+    }
+
     /// The pixel size of an image, without decoding it.
     public static func pixelSize(of data: Data) -> CGSize? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),

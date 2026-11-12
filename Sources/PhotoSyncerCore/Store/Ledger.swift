@@ -65,6 +65,30 @@ public struct Ledger: Codable, Sendable {
         return changed
     }
 
+    /// Drops "matched" entries that point at a remote photo another entry already holds: a
+    /// photo matched by name to a different photo with the same name (cameras reuse names),
+    /// which was then never uploaded. Entries that uploaded the photo are kept over matches.
+    /// Returns how many were dropped, so the next sync uploads them.
+    @discardableResult
+    public mutating func releaseSharedMatches() -> Int {
+        var holders: [String: [String]] = [:]
+        for (key, entry) in entries {
+            if let id = entry.remoteId { holders[id, default: []].append(key) }
+        }
+        var released = 0
+        for keys in holders.values where keys.count > 1 {
+            let matched = keys.filter { entries[$0]?.how == .matched }.sorted()
+            // Keep one holder: an upload if there is one, else the first match.
+            let drop = matched.count == keys.count ? Array(matched.dropFirst()) : matched
+            for key in drop {
+                entries.removeValue(forKey: key)
+                removed.insert(key)
+                released += 1
+            }
+        }
+        return released
+    }
+
     public var count: Int { entries.count }
 
     /// How many photos this mapping has put in an album (for the Pix-Star limit).

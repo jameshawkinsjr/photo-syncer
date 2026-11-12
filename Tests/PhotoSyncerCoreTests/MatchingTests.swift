@@ -64,6 +64,32 @@ struct SyncPlannerTests {
         #expect(plan.toUpload.count == 1)
     }
 
+    @Test func photosTheLedgerHoldsAreNotMatchedAgain() {
+        // IMG_1234 was uploaded earlier; a different photo with the same name is new.
+        var ledger = Ledger()
+        ledger.record("icloud:old", .init(how: .uploaded, remoteName: "IMG_1234.jpg", remoteId: "g1"))
+        ledger.record("icloud:legacy", .init(how: .uploaded, remoteName: "IMG_5678.jpg"))
+        let remote = [RemoteItem(id: "g1", name: "IMG_1234.jpg"), RemoteItem(id: "g2", name: "IMG_5678.jpg"),
+                      RemoteItem(id: "g3", name: "IMG_9999.jpg")]
+        let plan = SyncPlanner.plan(items: [item("icloud:old", "IMG_1234.HEIC"), item("icloud:new", "IMG_1234.HEIC"),
+                                            item("icloud:new2", "IMG_5678.HEIC"), item("icloud:there", "IMG_9999.HEIC")],
+                                    ledger: ledger, remote: remote, md5: { _ in nil })
+        #expect(plan.toUpload.map(\.key) == ["icloud:new", "icloud:new2"])
+        #expect(plan.matched.map(\.item.key) == ["icloud:there"], "a photo nobody holds still matches by name")
+    }
+
+    @Test func matchesOfAnotherPhotosUploadAreReleased() {
+        var ledger = Ledger()
+        ledger.record("a", .init(how: .uploaded, remoteName: "IMG_1.jpg", remoteId: "g1"))
+        ledger.record("b", .init(how: .matched, remoteName: "IMG_1.jpg", remoteId: "g1"))
+        ledger.record("c", .init(how: .matched, remoteName: "IMG_2.jpg", remoteId: "g2"))
+        ledger.record("d", .init(how: .matched, remoteName: "IMG_2.jpg", remoteId: "g2"))
+        ledger.record("e", .init(how: .matched, remoteName: "IMG_3.jpg", remoteId: "g3"))
+        #expect(ledger.releaseSharedMatches() == 2)
+        #expect(ledger.entries.keys.sorted() == ["a", "c", "e"])
+        #expect(ledger.releaseSharedMatches() == 0)
+    }
+
     @Test func pixStarNamesMatchLocalFiles() {
         let remote = PixStarParsing.photos(PixStarFixtures.photoPage)
         let plan = SyncPlanner.plan(items: [item("Summer Trip - 1 of 180.jpeg"), item("New photo.jpg")],

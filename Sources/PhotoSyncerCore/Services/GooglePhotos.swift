@@ -11,6 +11,9 @@ public final class GooglePhotosService: RemoteService, @unchecked Sendable {
     public let kind = ServiceKind.google
     /// batchCreate takes up to 50 items.
     public let preferredBatchSize = 20
+    /// Google allows one write (batchCreate) at a time per account; parallel batches get 429
+    /// "concurrent write request" errors.
+    public let maxParallelUploads = 1
 
     let http = HTTPClient()
     let tokens: GoogleTokenSource

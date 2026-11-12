@@ -278,6 +278,35 @@ struct ImageAndFolderTests {
         #expect(payload.mimeType == "image/jpeg")
     }
 
+    @Test func captureDatesSurviveDownsizing() throws {
+        let original = try ImageProcessing.settingCaptureDate(makeJPEG(width: 3000, height: 2000, shade: 3),
+                                                              to: Date(timeIntervalSince1970: 1_000_000_000),
+                                                              timeZone: TimeZone(secondsFromGMT: 2 * 3600)!)
+        let small = try #require(try ImageProcessing.prepare(original, options: ImageOptions(maxPixelSize: 1536, jpegQuality: 0.75)))
+        #expect(ImageProcessing.pixelSize(of: small) == CGSize(width: 1536, height: 1024))
+        #expect(ImageProcessing.captureDate(of: small) == .init(date: Date(timeIntervalSince1970: 1_000_000_000), hasOffset: true))
+    }
+
+    @Test func libraryDatesFillInMissingOrWrongFileDates() throws {
+        let taken = Date(timeIntervalSince1970: 157_000_000) // 1974
+        let undated = makeJPEG(width: 40, height: 30, shade: 2)
+        #expect(ImageProcessing.captureDate(of: undated) == nil)
+        let dated = try PhotosAlbumSource.withLibraryDate(undated, taken)
+        #expect(ImageProcessing.captureDate(of: dated)?.date == taken)
+        #expect(ImageProcessing.pixelSize(of: dated) == CGSize(width: 40, height: 30))
+
+        // A file dated when it was scanned gets the date set in Photos.
+        let scanned = try ImageProcessing.settingCaptureDate(undated, to: Date(timeIntervalSince1970: 1_700_000_000))
+        #expect(ImageProcessing.captureDate(of: try PhotosAlbumSource.withLibraryDate(scanned, taken))?.date == taken)
+
+        // A file that agrees with Photos is left byte for byte.
+        let agreeing = try ImageProcessing.settingCaptureDate(undated, to: taken)
+        #expect(try PhotosAlbumSource.withLibraryDate(agreeing, taken.addingTimeInterval(30)) == agreeing)
+        // Without an offset, a time-zone-sized gap isn't treated as a different date.
+        #expect(!ImageProcessing.needsCaptureDate(file: ImageProcessing.CaptureDate(date: taken.addingTimeInterval(7 * 3600), hasOffset: false), library: taken))
+        #expect(ImageProcessing.needsCaptureDate(file: ImageProcessing.CaptureDate(date: taken.addingTimeInterval(7 * 3600), hasOffset: true), library: taken))
+    }
+
     @Test func sizeEstimateCoversAnAccountsAlbums() async throws {
         let sandbox = try Sandbox()
         var total: Int64 = 0
