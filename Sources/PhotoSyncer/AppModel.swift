@@ -23,6 +23,8 @@ final class AppModel: ObservableObject {
     private(set) var log: SyncLog!
     private(set) var engine: SyncEngine!
     private(set) var lock: SyncLock!
+    /// Checks the release folder for a newer build; see Updater.swift.
+    private(set) var updater: Updater!
     /// When config.json was last read or written here, to notice changes from another Mac.
     private var configStamp: Date?
 
@@ -42,9 +44,17 @@ final class AppModel: ObservableObject {
     init() {
         config = AppConfig()
         open(storage)
+        // The updater's files are this Mac's, so it doesn't follow the sync data folder when that moves.
+        updater = Updater(storage: storage,
+                          log: { [weak self] line in self?.log.write(line) },
+                          isSyncing: { [weak self] in self?.isSyncing ?? false })
+        updater.start()
         let center = NotificationCenter.default
         center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.reloadIfChanged() }
+            Task { @MainActor in
+                self?.reloadIfChanged()
+                self?.updater.checkIfDue()
+            }
         }
         center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.lock.release() }

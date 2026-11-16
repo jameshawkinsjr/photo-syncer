@@ -2,7 +2,7 @@ import AppKit
 import PhotoSyncerCore
 import SwiftUI
 
-/// Where the sync data lives, and how it's shared with other Macs.
+/// Where the sync data lives, how it's shared with other Macs, and updates.
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @State private var pendingFolder: URL?
@@ -54,6 +54,8 @@ struct SettingsView: View {
                     }
                 }
             }
+
+            UpdatesSection(updater: model.updater, isSyncing: model.isSyncing)
         }
         .formStyle(.grouped)
         .navigationTitle("Settings")
@@ -108,5 +110,100 @@ struct SettingsView: View {
         } catch {
             self.error = error.localizedDescription
         }
+    }
+}
+
+/// The release folder, whether a newer build is there, and Install & Restart.
+struct UpdatesSection: View {
+    @ObservedObject var updater: Updater
+    let isSyncing: Bool
+
+    var body: some View {
+        Section {
+            LabeledContent("This version", value: updater.app?.label ?? "Not a built app")
+            LabeledContent("Release folder") {
+                if let folder = updater.releaseFolder {
+                    Text(PortablePath.display(folder.path)).textSelection(.enabled)
+                } else {
+                    Text("Not chosen").foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                Button("Choose…", action: chooseFolder)
+                Button("Show in Finder") {
+                    if let folder = updater.releaseFolder { NSWorkspace.shared.open(folder) }
+                }
+                .disabled(updater.releaseFolder == nil)
+            }
+            Toggle("Check automatically", isOn: Binding(get: { updater.settings.checkAutomatically },
+                                                        set: { updater.setCheckAutomatically($0) }))
+            LabeledContent("Last checked") {
+                Text(updater.settings.lastChecked.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "Never")
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent("Status") { status }
+            if let notes = updater.readyRelease?.notes, !notes.isEmpty {
+                LabeledContent("What's new") {
+                    Text(notes).fixedSize(horizontal: false, vertical: true).multilineTextAlignment(.trailing)
+                }
+            }
+            if let notice = updater.notice {
+                Text(notice).foregroundStyle(.red).font(.callout).fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Button("Check Now") { updater.check() }
+                    .disabled(updater.app == nil || updater.releaseFolder == nil || updater.isBusy)
+                Button("Install & Restart") { updater.install() }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(updater.readyRelease == nil || isSyncing)
+                if updater.readyRelease != nil && isSyncing {
+                    Text("Wait for the sync to finish.").foregroundStyle(.secondary).font(.callout)
+                }
+            }
+        } header: {
+            Text("Updates")
+        } footer: {
+            Text("Photo Syncer looks in the release folder for a newer build (published there with scripts/publish.sh), copies it to this Mac and checks it. Nothing is installed until you click Install & Restart. Use a folder only you can change: the app installs what it finds there. After an update, macOS may ask for Photos access again.")
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder private var status: some View {
+        if updater.app == nil {
+            Text("Updates need the built app (scripts/build-app.sh)").foregroundStyle(.secondary)
+        } else {
+            switch updater.status {
+            case .notChecked:
+                Text(updater.releaseFolder == nil ? "Choose a release folder to check for updates" : "Not checked yet")
+                    .foregroundStyle(.secondary)
+            case .checking:
+                Text("Checking…").foregroundStyle(.secondary)
+            case .upToDate:
+                Label("Up to date", systemImage: "checkmark.circle").foregroundStyle(.green)
+            case .downloading(let release):
+                Text("Downloading version \(release.label)…").foregroundStyle(.secondary)
+            case .ready(let release):
+                Label("Version \(release.label) is ready to install", systemImage: "arrow.down.circle").foregroundStyle(.blue)
+            case .installing(let release):
+                Text("Installing version \(release.label)…").foregroundStyle(.secondary)
+            case .failed(let message):
+                Text(message).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.trailing).textSelection(.enabled)
+            }
+        }
+    }
+
+    private func chooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Choose the folder builds are published to (the one with latest.json)."
+        if let folder = updater.releaseFolder { panel.directoryURL = folder }
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        updater.setReleaseFolder(folder)
     }
 }

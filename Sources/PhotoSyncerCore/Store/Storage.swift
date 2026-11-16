@@ -17,6 +17,9 @@ import SystemConfiguration
 ///     location.json           where the sync data folder is
 ///     secrets.json            Google client secret and tokens (mode 0600)
 ///     md5-cache.json          MD5s of source files, by path, size and date
+///     updates.json            the release folder, and when updates were last checked
+///
+/// A downloaded update waits in ~/Library/Caches/Photo Syncer/Updates until it's installed.
 ///
 /// Amazon and Pix-Star sign-ins live in WebKit's per-account stores, also per Mac.
 public struct Storage: Sendable {
@@ -73,6 +76,17 @@ public struct Storage: Sendable {
     public var secretsURL: URL { localRoot.appendingPathComponent("secrets.json") }
     public var md5CacheURL: URL { localRoot.appendingPathComponent("md5-cache.json") }
     var locationURL: URL { localRoot.appendingPathComponent("location.json") }
+    public var updateSettingsURL: URL { localRoot.appendingPathComponent("updates.json") }
+
+    /// Where a downloaded update waits to be installed: the caches folder, or a folder inside
+    /// this Mac's folder when that isn't the standard one (tests, and PHOTO_SYNCER_HOME).
+    public var updateStagingDirectory: URL {
+        if localRoot.standardizedFileURL == Storage.defaultLocalRoot.standardizedFileURL {
+            return FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Photo Syncer/Updates", isDirectory: true)
+        }
+        return localRoot.appendingPathComponent("Updates", isDirectory: true)
+    }
 
     private func directory(_ name: String, in root: URL) -> URL {
         let url = root.appendingPathComponent(name, isDirectory: true)
@@ -170,6 +184,18 @@ public struct Storage: Sendable {
     /// When config.json last changed, to notice edits made on another Mac.
     public var configModified: Date? {
         (try? configURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
+    // MARK: Updates
+
+    /// This Mac's update settings; the defaults when there are none yet.
+    public func loadUpdateSettings() -> UpdateSettings {
+        guard let data = try? Data(contentsOf: updateSettingsURL) else { return UpdateSettings() }
+        return ((try? JSONDecoder.syncer.decode(UpdateSettings.self, from: data)) ?? UpdateSettings()).withPortablePath()
+    }
+
+    public func saveUpdateSettings(_ settings: UpdateSettings) throws {
+        try JSONEncoder.syncer.encode(settings.withPortablePath()).write(to: updateSettingsURL, options: .atomic)
     }
 
     // MARK: Secrets
