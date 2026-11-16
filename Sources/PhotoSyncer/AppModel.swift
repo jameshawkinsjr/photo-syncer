@@ -340,6 +340,16 @@ final class AppModel: ObservableObject {
         statuses[mapping.id]?.outcome = nil
     }
 
+    /// Check Photos' Upload Again: the next sync uploads these photos of `mapping` afresh.
+    func uploadAgain(_ keys: [String], in mapping: Mapping) {
+        do {
+            try engine.uploadAgain(keys, in: mapping)
+        } catch {
+            log.write("Couldn't save the sync history: \(error.localizedDescription)")
+        }
+        refreshCounts()
+    }
+
     func openLogFolder() {
         NSWorkspace.shared.open(storage.logsDirectory)
     }

@@ -220,12 +220,24 @@ public struct PhotosAlbumSource: PhotoSource {
     public func payload(for item: SourceItem, options: ImageOptions) async throws -> UploadPayload {
         let data = try await originalData(for: item)
         let base = (item.fileName as NSString).deletingPathExtension
-        // Frames and Pix-Star can't all show HEIC, so photos go up as JPEG.
+        return UploadPayload(data: try Self.uploadData(from: data, date: item.date, options: options).data,
+                             fileName: NameMatching.uploadName(base: base, ext: "jpg"), mimeType: "image/jpeg")
+    }
+
+    /// What's uploaded for a photo exported from Photos: a plain JPEG (frames can't all show
+    /// HEIC, wide colour or HDR), dated as the library dates it. `redated` says whether the
+    /// library's date had to be written in. With `refusingBlack`, a copy that came out black
+    /// from a photo that isn't throws instead of being returned.
+    static func uploadData(from data: Data, date: Date?, options: ImageOptions,
+                           refusingBlack: Bool = true) throws -> (data: Data, redated: Bool) {
         var options = options
         options.preferJPEG = true
         let jpeg = try ImageProcessing.prepare(data, options: options) ?? data
-        return UploadPayload(data: try Self.withLibraryDate(jpeg, item.date),
-                             fileName: NameMatching.uploadName(base: base, ext: "jpg"), mimeType: "image/jpeg")
+        let dated = try withLibraryDate(jpeg, date)
+        if refusingBlack && ImageProcessing.looksBlack(dated) && !ImageProcessing.looksBlack(data) {
+            throw SyncError.unexpected("The copy made for uploading came out black, so it wasn't uploaded. Use Check Photos… on this mapping to see why.")
+        }
+        return (dated, dated != jpeg)
     }
 
     /// Photos shows the date in its library, which a photo's file may not have: scans, photos

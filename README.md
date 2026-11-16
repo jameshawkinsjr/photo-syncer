@@ -31,6 +31,9 @@ Photos › Frames › Family ──┬──▶ Amazon Photos / Family
   drive, and every Mac knows what's already been synced.
 - Pix-Star's 3,000-photos-per-album limit is handled by rolling over into `<album> 2`, `<album> 3`, ….
 - Pix-Star album backup, with a list of the photos that aren't in a local folder.
+- Photos from the Photos library go up as plain JPEGs (8-bit sRGB, upright, without HDR gain
+  maps, depth data or transparency) that any frame can show.
+- **Check Photos…** to find out why a frame shows certain photos wrongly, and to upload them again.
 - Never deletes anything from a service.
 
 ## Install
@@ -73,11 +76,31 @@ the source as synced, so only photos added from now on go up. Use that when the 
 already has the photos but they can't be matched (for example, a Photos album as the source
 when the service was filled from exported copies).
 
+### When a frame shows some photos black (or wrongly)
+
+Choose **Check Photos…** in the mapping's ⋯ menu and type the days the photos were taken
+(`2024-06-01, 2024-06-15`). Photo Syncer looks at the photos in the source from those days
+(and the day either side), and at the copies it would upload, without uploading anything:
+
+- in orange, what the original holds that a simple frame may get wrong: an HDR gain map, depth
+  or portrait mattes, a wide-gamut (Display P3) or unusual colour profile, 16-bit samples,
+  transparency, or a HEIC/PNG file;
+- in green or red, whether the copy it would upload is a plain JPEG that isn't black.
+
+The same goes into the log, one line per photo (a Photos photo is named by its local id,
+not its file name). Copies uploaded by hand, or before this check existed, may still be the
+problem: delete those photos from the album on the service first (Photo Syncer never deletes),
+tick them in Check Photos and choose **Upload Again**. The next sync uploads fresh copies,
+even if a photo with the same name is still listed there, so delete first or you'll get two.
+
+Photo Syncer also refuses to upload a copy that comes out black from a photo that isn't, and
+says so in the log.
+
 ### Service notes
 
 | Service | How it talks to it | Notes |
 | --- | --- | --- |
-| Amazon Photos | The web API amazon.com/photos uses, with the in-app sign-in's cookies | Albums made from a folder ("smart" albums) are filled by uploading into the folder. Other albums get a `Photo Syncer/<album>` folder. Originals are uploaded untouched. |
+| Amazon Photos | The web API amazon.com/photos uses, with the in-app sign-in's cookies | Albums made from a folder ("smart" albums) are filled by uploading into the folder. Other albums get a `Photo Syncer/<album>` folder. Files from a folder are uploaded untouched (so MD5 matching works); photos from a Photos album go up as plain JPEGs. |
 | Pix-Star | pix-star.com's web-album pages and uploader, with the in-app sign-in's cookies | **A frame syncs at most 3,000 photos per album.** When an album is full, Photo Syncer creates `<album> 2`, `<album> 3`, … and carries on; add those to the frame's slideshow. Photos are downsized to 2048 px before upload (Pix-Star keeps small copies anyway); change it per account. Albums managed by a multi-frame account can only be uploaded to from that account. **Back Up an Album…** downloads an album to disk and sets aside the photos that have no match in a local folder. |
 | Google Photos | The official Photos Library API | Since March 2025 apps can only add to **albums they created**, so create the album from Photo Syncer and pick it on the frame. Needs your own OAuth client (below). Uploads count against your Google storage: turn on **Compress photos** (and downsizing) in the account's settings to upload smaller copies. |
 | Folder | Copies files | One sub-folder per album, plus `index.json` (newest first) so a dashboard can read one file. |
@@ -183,10 +206,12 @@ syncing everything) into PNGs and quit, for checking the UI from a script.
 
 - `Sources/PhotoSyncerCore`: no UI.
   - `Models/Config.swift`: accounts, sources, destinations, mappings.
-  - `Sources/`: folder and Photos-album sources (PhotoKit), and the upload payloads (JPEG conversion, downsizing).
+  - `Sources/`: folder and Photos-album sources (PhotoKit), and the upload payloads.
+  - `Util/ImageProcessing.swift`: JPEG conversion (to plain 8-bit sRGB), downsizing, compression, capture dates.
   - `Services/`: one client per service, behind `RemoteService`.
   - `Sync/SyncPlanner.swift`: what's new, matched, or to upload (pure, tested).
   - `Sync/SyncEngine.swift`: runs a mapping, Pix-Star overflow, backups, the log.
+  - `Sync/PhotoCheck.swift`: Check Photos (what's in a photo and its upload copy) and Upload Again.
   - `Store/`: where files live (`Storage`: sync data folder versus this Mac's folder, moving
     between them, the `SyncLock`), and the per-mapping `Ledger` (merged on save).
 - `Sources/PhotoSyncer`: the SwiftUI app, in-app sign-in (`Auth/WebSessions.swift`), Google OAuth hand-off,

@@ -5,6 +5,7 @@ import SwiftUI
 struct SyncView: View {
     @EnvironmentObject var model: AppModel
     @State private var editing: Mapping?
+    @State private var checking: Mapping?
     @State private var adding = false
 
     private var groups: [(key: String, source: SourceRef, mappings: [Mapping])] {
@@ -27,7 +28,7 @@ struct SyncView: View {
                     ForEach(groups, id: \.key) { group in
                         Section {
                             ForEach(group.mappings) { mapping in
-                                MappingRow(mapping: mapping, onEdit: { editing = mapping })
+                                MappingRow(mapping: mapping, onEdit: { editing = mapping }, onCheck: { checking = mapping })
                             }
                         } header: {
                             Label(group.source.displayName, systemImage: sourceIcon(group.source))
@@ -51,6 +52,9 @@ struct SyncView: View {
         }
         .sheet(item: $editing) { mapping in
             MappingEditor(mapping: mapping) { editing = nil }
+        }
+        .sheet(item: $checking) { mapping in
+            CheckPhotosSheet(mapping: mapping) { checking = nil }
         }
     }
 
@@ -81,6 +85,7 @@ struct MappingRow: View {
     @EnvironmentObject var model: AppModel
     let mapping: Mapping
     let onEdit: () -> Void
+    let onCheck: () -> Void
     @State private var confirmingUpload = false
 
     private var status: MappingStatus { model.statuses[mapping.id] ?? MappingStatus() }
@@ -128,6 +133,8 @@ struct MappingRow: View {
                         updated.enabled.toggle()
                         model.upsertMapping(updated)
                     }
+                    Button("Check Photos…", action: onCheck)
+                        .help("See what's in photos a frame shows wrongly, and upload them again")
                     Divider()
                     Button("Mark Everything as Already Synced") { model.markAllSynced(mapping) }
                     Button("Forget Sync History") { model.resetHistory(mapping) }

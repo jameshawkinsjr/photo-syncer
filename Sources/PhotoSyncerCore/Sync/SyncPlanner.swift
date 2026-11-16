@@ -51,7 +51,9 @@ public enum SyncPlanner {
 
         var unmatched: [SourceItem] = []
         // MD5 matches first, so a name match can't take a remote photo an exact match needs.
-        for item in fresh {
+        // Photos to upload again skip matching: their old copy may still be listed.
+        for item in fresh where ledger.reupload.contains(item.key) { plan.toUpload.append(item) }
+        for item in fresh where !ledger.reupload.contains(item.key) {
             if let hash = md5(item), let hit = take(byMD5[hash]) {
                 plan.matched.append((item, hit))
             } else {
