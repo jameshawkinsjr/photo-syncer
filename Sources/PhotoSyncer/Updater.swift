@@ -274,11 +274,19 @@ enum UpdateInstaller {
     private static func resultURL(in staging: URL) -> URL { staging.appendingPathComponent("install-result") }
     private static func workDirectory(in staging: URL) -> URL { staging.appendingPathComponent("Install", isDirectory: true) }
 
-    /// How the last install ended, if one ran since this was last asked.
+    /// How the last install ended, if one ran since this was last asked. Also clears what an
+    /// install leaves behind (the helper script, an unpacked app that was never installed).
     static func takeResult(in staging: URL) -> Result? {
+        let files = FileManager.default
+        let work = workDirectory(in: staging)
+        if files.fileExists(atPath: work.path) {
+            let mount = work.appendingPathComponent("mount", isDirectory: true)
+            if ((try? files.contentsOfDirectory(atPath: mount.path)) ?? []).isEmpty == false { detach(mount) }
+            try? files.removeItem(at: work)
+        }
         let url = resultURL(in: staging)
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        try? FileManager.default.removeItem(at: url)
+        try? files.removeItem(at: url)
         return Result(rawValue: text.trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
@@ -301,7 +309,7 @@ enum UpdateInstaller {
         try? files.removeItem(at: work)
         try files.createDirectory(at: mount, withIntermediateDirectories: true)
 
-        try run("/usr/bin/hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mount.path, image.path)
+        try attach(image, at: mount)
         let payload = work.appendingPathComponent(app.bundleURL.lastPathComponent, isDirectory: true)
         do {
             defer { detach(mount) }
@@ -446,29 +454,50 @@ enum UpdateInstaller {
         return nil
     }
 
-    private static func detach(_ mount: URL) {
-        if (try? run("/usr/bin/hdiutil", "detach", mount.path)) == nil {
-            _ = try? run("/usr/bin/hdiutil", "detach", mount.path, "-force")
+    /// Mounts a disk image where Finder won't show it. `hdiutil attach` works on every macOS
+    /// the app supports but is deprecated from macOS 27, which points at `diskutil image`
+    /// instead; that's the fallback for when hdiutil stops doing it.
+    private static func attach(_ image: URL, at mount: URL) throws {
+        do {
+            try run("/usr/bin/hdiutil", "attach", "-nobrowse", "-readonly", "-noautoopen", "-mountpoint", mount.path, image.path)
+        } catch {
+            guard (try? run("/usr/sbin/diskutil", "image", "attach", "--readOnly", "--nobrowse", "--mountPoint", mount.path, image.path)) != nil else {
+                throw error
+            }
         }
     }
 
-    /// Runs a tool and returns what it printed; throws with that output if it fails.
+    private static func detach(_ mount: URL) {
+        if (try? run("/usr/bin/hdiutil", "detach", mount.path)) != nil { return }
+        if (try? run("/usr/sbin/diskutil", "eject", mount.path)) != nil { return }
+        _ = try? run("/usr/bin/hdiutil", "detach", mount.path, "-force")
+    }
+
+    /// Runs a tool and returns what it printed; throws with that output if it fails. The output
+    /// goes through a file, not a pipe: hdiutil leaves a helper running that would hold a pipe
+    /// open, and reading it to the end would wait on that helper.
     @discardableResult
     private static func run(_ tool: String, _ arguments: String...) throws -> String {
+        let files = FileManager.default
+        let capture = files.temporaryDirectory.appendingPathComponent("photo-syncer-update-\(UUID().uuidString).txt")
+        files.createFile(atPath: capture.path, contents: nil)
+        defer { try? files.removeItem(at: capture) }
+        let output = try FileHandle(forWritingTo: capture)
+        defer { try? output.close() }
+
         let process = Process()
         process.executableURL = URL(fileURLWithPath: tool)
         process.arguments = arguments
-        let pipe = Pipe()
         process.standardInput = FileHandle.nullDevice
-        process.standardOutput = pipe
-        process.standardError = pipe
+        process.standardOutput = output
+        process.standardError = output
         try process.run()
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
         process.waitUntilExit()
+
+        let printed = ((try? String(contentsOf: capture, encoding: .utf8)) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard process.terminationStatus == 0 else {
-            throw Failure.tool(URL(fileURLWithPath: tool).lastPathComponent, output.isEmpty ? "exit \(process.terminationStatus)" : output)
+            throw Failure.tool(URL(fileURLWithPath: tool).lastPathComponent, printed.isEmpty ? "exit \(process.terminationStatus)" : printed)
         }
-        return output
+        return printed
     }
 }
