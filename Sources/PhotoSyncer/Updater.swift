@@ -179,7 +179,13 @@ final class Updater: ObservableObject {
                 let message = error.localizedDescription
                 if message != lastLoggedFailure { log("Checking for updates: \(message)") }
                 lastLoggedFailure = message
-                finish(.failed(message))
+                // A build that's already downloaded and checked stays installable when the
+                // release folder can't be reached (a shared drive that isn't connected).
+                if let waiting, FileManager.default.fileExists(atPath: checker.stagedImage(for: waiting).path) {
+                    isChecking = false
+                } else {
+                    finish(.failed(message))
+                }
             }
         }
     }
@@ -320,6 +326,16 @@ enum UpdateInstaller {
             try run("/usr/bin/ditto", source.path, payload.path)
         }
 
+        do {
+            try check(payload, is: release, replacing: app)
+        } catch {
+            try? files.removeItem(at: payload)
+            throw error
+        }
+        return payload
+    }
+
+    private static func check(_ payload: URL, is release: ReleaseInfo, replacing app: InstalledApp) throws {
         guard let info = info(payload), info["CFBundleIdentifier"] as? String == app.bundleID else { throw Failure.noApp }
         let found = info["CFBundleVersion"] as? String ?? "?"
         guard Int(found) == release.build else { throw Failure.wrongBuild(found: found, expected: release.build) }
@@ -331,7 +347,6 @@ enum UpdateInstaller {
         }
         // An ad hoc signature has no team, so there's nothing to compare; a real one must match.
         if let team = signingTeam(of: app.bundleURL), signingTeam(of: payload) != team { throw Failure.differentSigner }
-        return payload
     }
 
     /// Starts the helper that swaps the bundles once this process has quit. Call
@@ -349,6 +364,8 @@ enum UpdateInstaller {
             String(ProcessInfo.processInfo.processIdentifier), payload.path, app.bundleURL.path,
             logURL(in: staging).path, resultURL(in: staging).path,
         ]
+        // The reopened app gets the helper's environment; the testing switch stops here.
+        process.environment = ProcessInfo.processInfo.environment.filter { $0.key != "PHOTO_SYNCER_UPDATE_AUTOINSTALL" }
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
@@ -370,6 +387,11 @@ enum UpdateInstaller {
         target="$3"
         log="$4"
         result="$5"
+        case "$target" in
+            /*.app) ;;
+            *) exit 64 ;;
+        esac
+        [ -d "$new" ] && [ -n "$log" ] && [ -n "$result" ] || exit 64
         incoming="$target.incoming"
         backup="$target.previous"
 
