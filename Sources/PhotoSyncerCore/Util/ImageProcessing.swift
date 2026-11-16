@@ -10,7 +10,7 @@ public struct ImageOptions: Sendable, Hashable {
     /// Re-encode every photo as JPEG at this quality (0–1) to save space. `nil` keeps the
     /// photo's own quality (it's only re-encoded when it has to be resized or converted).
     public var jpegQuality: Double?
-    /// Convert HEIC, PNG and the like to JPEG.
+    /// Convert HEIC, PNG and the like, and any JPEG that isn't plain 8-bit sRGB, to a plain JPEG.
     public var preferJPEG: Bool
 
     public init(maxPixelSize: Int? = nil, jpegQuality: Double? = nil, preferJPEG: Bool = false) {
@@ -27,12 +27,14 @@ public enum ImageProcessing {
     /// The JPEG to upload instead of `data`, or `nil` to upload `data` as it is.
     /// Compressing alone never makes a photo bigger: if the re-encoded copy isn't smaller
     /// (an already well-compressed JPEG, or a HEIC that may stay HEIC), the original is kept.
+    /// With `preferJPEG`, anything but a plain JPEG (`isPlainJPEG`) is converted, including
+    /// JPEGs that are wide-gamut, HDR or carry depth data.
     public static func prepare(_ data: Data, options: ImageOptions) throws -> Data? {
         let needsResize: Bool = {
             guard let limit = options.maxPixelSize, let size = pixelSize(of: data) else { return false }
             return max(size.width, size.height) > CGFloat(limit)
         }()
-        let mustConvert = options.preferJPEG && !Self.isJPEG(data)
+        let mustConvert = options.preferJPEG && !Self.isPlainJPEG(data)
         guard needsResize || mustConvert || options.jpegQuality != nil else { return nil }
 
         let output = try jpeg(from: data, maxPixelSize: needsResize ? options.maxPixelSize : nil,
@@ -58,9 +60,13 @@ public enum ImageProcessing {
         data.count > 3 && data[data.startIndex] == 0xFF && data[data.startIndex + 1] == 0xD8
     }
 
-    /// Re-encodes an image as JPEG, keeping its metadata (capture date, location) and
-    /// applying its orientation. With `maxPixelSize`, the long edge is scaled down to it;
-    /// smaller images are left at their size.
+    /// Re-encodes an image as a plain JPEG: 8-bit sRGB, opaque, upright, with only its
+    /// portable metadata (capture date, location, camera, caption). With `maxPixelSize`, the
+    /// long edge is scaled down to it; smaller images are left at their size.
+    ///
+    /// Frames are simple decoders, so everything else is dropped: wide-gamut and HDR colour
+    /// (converted to sRGB), HDR gain maps, depth and portrait mattes, transparency (flattened
+    /// onto white), 16-bit samples, and vendor metadata such as Apple's HDR tags.
     public static func jpeg(from data: Data, maxPixelSize: Int? = nil, quality: Double = ImageOptions.defaultQuality) throws -> Data {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               CGImageSourceGetCount(source) > 0 else { throw Failure.unreadable }
@@ -70,26 +76,20 @@ public enum ImageProcessing {
         let longEdge = max(width, height)
         let target = maxPixelSize.map { min($0, longEdge > 0 ? longEdge : $0) } ?? longEdge
 
-        // The thumbnail API applies the EXIF orientation and scales in one step.
+        // The thumbnail API applies the EXIF orientation and scales in one step. It decodes the
+        // standard (SDR) rendition; a gain map is never applied.
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: max(target, 1),
             kCGImageSourceShouldCacheImmediately: true,
         ]
-        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+        guard let decoded = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             throw Failure.unreadable
         }
+        let image = try flattened(decoded)
 
-        var metadata = properties
-        // The pixels are already upright, so the orientation tag must say so.
-        metadata[kCGImagePropertyOrientation] = 1
-        if var tiff = metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
-            tiff[kCGImagePropertyTIFFOrientation] = 1
-            metadata[kCGImagePropertyTIFFDictionary] = tiff
-        }
-        metadata[kCGImagePropertyPixelWidth] = nil
-        metadata[kCGImagePropertyPixelHeight] = nil
+        var metadata = portableMetadata(properties, width: image.width, height: image.height)
         metadata[kCGImageDestinationLossyCompressionQuality] = quality
 
         let output = NSMutableData()
@@ -99,6 +99,125 @@ public enum ImageProcessing {
         CGImageDestinationAddImage(destination, image, metadata as CFDictionary)
         guard CGImageDestinationFinalize(destination) else { throw Failure.encodeFailed }
         return output as Data
+    }
+
+    /// The image drawn into an opaque 8-bit sRGB bitmap: colour converted from any profile,
+    /// transparency flattened onto white, deeper samples reduced to 8 bits.
+    static func flattened(_ image: CGImage) throws -> CGImage {
+        guard let sRGB = CGColorSpace(name: CGColorSpace.sRGB),
+              let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
+                                      bytesPerRow: 0, space: sRGB, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else {
+            throw Failure.encodeFailed
+        }
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        context.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(rect)
+        context.interpolationQuality = .high
+        context.draw(image, in: rect)
+        guard let result = context.makeImage() else { throw Failure.encodeFailed }
+        return result
+    }
+
+    /// The metadata worth keeping in a converted photo: EXIF (when and how it was taken), GPS,
+    /// TIFF (camera, date) and IPTC (captions), with the orientation reset to upright and the
+    /// size and colour space set to the new image's. Vendor dictionaries (Apple's HDR tags),
+    /// colour profile names and auxiliary-image descriptions are left behind.
+    static func portableMetadata(_ properties: [CFString: Any], width: Int, height: Int) -> [CFString: Any] {
+        var metadata: [CFString: Any] = [kCGImagePropertyOrientation: 1]
+        if var exif = properties[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+            exif[kCGImagePropertyExifPixelXDimension] = width
+            exif[kCGImagePropertyExifPixelYDimension] = height
+            exif[kCGImagePropertyExifColorSpace] = 1 // sRGB
+            exif[kCGImagePropertyExifMakerNote] = nil
+            metadata[kCGImagePropertyExifDictionary] = exif
+        }
+        if var tiff = properties[kCGImagePropertyTIFFDictionary] as? [CFString: Any] {
+            tiff[kCGImagePropertyTIFFOrientation] = 1
+            metadata[kCGImagePropertyTIFFDictionary] = tiff
+        }
+        for key in [kCGImagePropertyGPSDictionary, kCGImagePropertyIPTCDictionary] {
+            if let value = properties[key] { metadata[key] = value }
+        }
+        return metadata
+    }
+
+    /// Whether the bytes are a JPEG any frame can show as it is: one 8-bit image, sRGB (or
+    /// untagged), opaque, RGB or grey, with no gain map, depth or matte images inside.
+    /// iPhone HDR JPEGs, Display P3 JPEGs and the like aren't.
+    public static func isPlainJPEG(_ data: Data) -> Bool {
+        guard isJPEG(data),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetCount(source) == 1,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return false }
+        if let depth = properties[kCGImagePropertyDepth] as? Int, depth != 8 { return false }
+        if properties[kCGImagePropertyHasAlpha] as? Bool == true { return false }
+        if let model = properties[kCGImagePropertyColorModel] as? String,
+           model != (kCGImagePropertyColorModelRGB as String) && model != (kCGImagePropertyColorModelGray as String) { return false }
+        if let profile = properties[kCGImagePropertyProfileName] as? String, !profile.hasPrefix("sRGB") { return false }
+        return auxiliaryData(in: source).isEmpty
+    }
+
+    /// The auxiliary images a photo carries, by name: "HDR gain map", "depth", and so on.
+    public static func auxiliaryData(of data: Data) -> [String] {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return [] }
+        return auxiliaryData(in: source)
+    }
+
+    static func auxiliaryData(in source: CGImageSource) -> [String] {
+        guard CGImageSourceGetCount(source) > 0 else { return [] }
+        var kinds: [(CFString, String)] = [(kCGImageAuxiliaryDataTypeHDRGainMap, "HDR gain map")]
+        if #available(macOS 15, *) { kinds.append((kCGImageAuxiliaryDataTypeISOGainMap, "ISO gain map")) }
+        kinds += [
+            (kCGImageAuxiliaryDataTypeDepth, "depth"),
+            (kCGImageAuxiliaryDataTypeDisparity, "disparity"),
+            (kCGImageAuxiliaryDataTypePortraitEffectsMatte, "portrait matte"),
+            (kCGImageAuxiliaryDataTypeSemanticSegmentationSkinMatte, "skin matte"),
+            (kCGImageAuxiliaryDataTypeSemanticSegmentationHairMatte, "hair matte"),
+            (kCGImageAuxiliaryDataTypeSemanticSegmentationTeethMatte, "teeth matte"),
+            (kCGImageAuxiliaryDataTypeSemanticSegmentationGlassesMatte, "glasses matte"),
+            (kCGImageAuxiliaryDataTypeSemanticSegmentationSkyMatte, "sky matte"),
+        ]
+        return kinds.compactMap { type, name in
+            CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, type) != nil ? name : nil
+        }
+    }
+
+    // MARK: Brightness
+
+    /// The average brightness (0 = black, 255 = white) of the image as a plain viewer shows
+    /// it: upright, in sRGB, with any transparency over black. `nil` if it can't be decoded.
+    public static func meanLuma(of data: Data) -> Double? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 64,
+        ]
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
+              let sRGB = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let side = 32
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let drawn: Bool = pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(data: buffer.baseAddress, width: side, height: side, bitsPerComponent: 8,
+                                          bytesPerRow: side * 4, space: sRGB,
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard drawn else { return nil }
+        var total = 0.0
+        for index in stride(from: 0, to: pixels.count, by: 4) {
+            total += 0.2126 * Double(pixels[index]) + 0.7152 * Double(pixels[index + 1]) + 0.0722 * Double(pixels[index + 2])
+        }
+        return total / Double(side * side)
+    }
+
+    /// Below this average brightness a photo shows as black.
+    public static let nearlyBlackLuma = 8.0
+
+    public static func looksBlack(_ data: Data) -> Bool {
+        guard let luma = meanLuma(of: data) else { return false }
+        return luma < nearlyBlackLuma
     }
 
     // MARK: Capture date

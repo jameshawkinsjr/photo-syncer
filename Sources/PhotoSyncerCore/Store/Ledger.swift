@@ -31,18 +31,44 @@ public struct Ledger: Codable, Sendable {
     }
 
     public var entries: [String: Entry] = [:]
+    /// Photos the person asked to upload again (their copy in the destination was bad and has
+    /// been deleted). The next sync uploads them without matching them to anything already
+    /// there, since a leftover copy with the same name would otherwise count as "already there".
+    public var reupload: Set<String> = []
     /// Keys renamed away since loading, so a merge on save doesn't bring them back.
     var removed: Set<String> = []
 
-    enum CodingKeys: String, CodingKey { case entries }
+    enum CodingKeys: String, CodingKey { case entries, reupload }
 
     public init() {}
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        entries = try container.decode([String: Entry].self, forKey: .entries)
+        reupload = try container.decodeIfPresent(Set<String>.self, forKey: .reupload) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(entries, forKey: .entries)
+        if !reupload.isEmpty { try container.encode(reupload.sorted(), forKey: .reupload) }
+    }
 
     public func contains(_ key: String) -> Bool { entries[key] != nil }
 
     public mutating func record(_ key: String, _ entry: Entry) {
         entries[key] = entry
         removed.remove(key)
+        reupload.remove(key)
+    }
+
+    /// Forgets that these photos were pushed, so the next sync uploads them again (see `reupload`).
+    public mutating func uploadAgain(_ keys: [String]) {
+        for key in keys {
+            entries.removeValue(forKey: key)
+            removed.insert(key)
+            reupload.insert(key)
+        }
     }
 
     /// Moves an entry to a new key (a photo's Mac-only id to its iCloud id).
@@ -116,9 +142,11 @@ public struct LedgerStore: Sendable {
     /// loaded the file are kept, so two Macs syncing the same mapping never lose each other's work.
     public func save(_ ledger: Ledger, for mappingId: UUID) throws {
         var merged = ledger
-        for (key, entry) in load(mappingId).entries where merged.entries[key] == nil && !ledger.removed.contains(key) {
+        let onDisk = load(mappingId)
+        for (key, entry) in onDisk.entries where merged.entries[key] == nil && !ledger.removed.contains(key) {
             merged.entries[key] = entry
         }
+        merged.reupload.formUnion(onDisk.reupload.filter { merged.entries[$0] == nil })
         try JSONEncoder.syncer.encode(merged).write(to: url(mappingId), options: .atomic)
     }
 
