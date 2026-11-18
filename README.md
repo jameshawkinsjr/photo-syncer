@@ -31,6 +31,8 @@ Photos › Frames › Family ──┬──▶ Amazon Photos / Family
   drive, and every Mac knows what's already been synced.
 - Pix-Star's 3,000-photos-per-album limit is handled by rolling over into `<album> 2`, `<album> 3`, ….
 - Pix-Star album backup, with a list of the photos that aren't in a local folder.
+- Updates itself from a folder you publish builds to: it finds a newer build, downloads and
+  checks it, and installs it when you click **Install & Restart**.
 - Never deletes anything from a service.
 
 ## Install
@@ -127,9 +129,11 @@ the mapping editor (**Create**), then choose it on your frame.
 | `location.json` | Where the sync data folder is |
 | `secrets.json` (mode 0600) | Google client secret and tokens |
 | `md5-cache.json` | MD5s of source files, by path, size and date |
+| `updates.json` | The release folder, whether to check automatically, and when it last checked |
 
 Amazon and Pix-Star sign-ins live in WebKit's per-account data stores on each Mac, and are
 removed with the account. The whole sync data folder is about 1 MB for ten thousand photos.
+A downloaded update waits in `~/Library/Caches/Photo Syncer/Updates/` until it's installed.
 
 ### Using it on more than one Mac
 
@@ -158,6 +162,66 @@ What makes this work:
 Set `PHOTO_SYNCER_HOME=<folder>` to run the app with everything (sync data and this Mac's
 files) in one throwaway folder.
 
+## Publishing and updating
+
+If you build Photo Syncer yourself and run it on more than one Mac, the app can update itself
+from a **release folder**: any folder every Mac can reach (iCloud Drive, Dropbox, a shared
+drive), for example `~/Dropbox/Photo Syncer Releases`.
+
+**Publish** (on the Mac you build on):
+
+1. Create the folder, and tell the script where it is, once:
+   `echo "~/Dropbox/Photo Syncer Releases" > .release-dir` in the repository (the file is
+   gitignored), or set `RELEASE_DIR` each time.
+2. Commit your changes, then run `scripts/publish.sh` (optionally
+   `--notes "What changed"`). It builds the disk image, copies it to the folder, and then
+   writes `latest.json` there:
+
+   ```json
+   {
+     "build" : 42,
+     "file" : "Photo-Syncer-1.2.0-42.dmg",
+     "notes" : "What changed",
+     "publishedAt" : "2026-01-02T03:04:05Z",
+     "sha256" : "…",
+     "version" : "1.2.0"
+   }
+   ```
+
+   The **build** number is the git commit count, and it's what decides "newer"; the version
+   (`VERSION=1.2.0 scripts/publish.sh`) is only shown. The script refuses to publish a build
+   that isn't higher than the one already in `latest.json`, so commit before publishing again.
+
+**Update** (on every Mac):
+
+1. **Settings › Updates › Choose…** and pick the release folder. Each Mac remembers its own.
+2. Photo Syncer reads `latest.json` when it opens, when it comes forward (at most once an
+   hour), and on **Check Now**. When the build there is newer, it copies the disk image to
+   this Mac (waiting for iCloud to download it if needed) and checks its SHA-256.
+3. The status then says the version is ready. Nothing is installed until you click
+   **Install & Restart** (not available during a sync): the app checks that the image holds
+   the announced build of Photo Syncer with a valid code signature, quits, and a small helper
+   swaps the app and opens it again. The old app is kept until the new one is in place, and is
+   put back if anything fails; `~/Library/Caches/Photo Syncer/Updates/install.log` says what happened.
+
+Things to know:
+
+- **The app installs what it finds in that folder**, so use one only you can write to. The
+  checksum guards against a half-synced or damaged file, not against someone who can change
+  both the image and `latest.json`. When the running app is signed with an Apple certificate,
+  the new build must be signed by the same team; ad hoc and self-signed builds have no team to check.
+- Updates aren't notarized (that needs a Developer ID; see Building). The helper clears the
+  quarantine flag on the app it installs, so it opens without a Gatekeeper warning.
+- With ad hoc signing, macOS asks for Photos access again after every update, because each
+  build has a new signature. Signing every build with the same certificate avoids that on the
+  Mac that has it (`scripts/make-signing-cert.sh`).
+- The app replaces itself wherever it is, so it must be somewhere you can write to (your own
+  Applications folder is fine). If macOS says Photo Syncer was prevented from modifying apps,
+  allow it under System Settings › Privacy & Security › App Management and click
+  **Install & Restart** again.
+- Old disk images stay in the release folder; delete them when you like (the app only reads
+  the one `latest.json` names).
+
 ## Building
 
 Needs the Xcode Command Line Tools (Xcode itself is optional) and macOS 14 or later.
@@ -167,6 +231,7 @@ Needs the Xcode Command Line Tools (Xcode itself is optional) and macOS 14 or la
 | `scripts/test.sh` | Runs the tests (Swift Testing). |
 | `scripts/build-app.sh [--install] [--open]` | Builds `build/Photo Syncer.app`, optionally installs or opens it. |
 | `scripts/make-dmg.sh` | Builds the app and `build/Photo-Syncer-<version>.dmg`. Arranging the DMG window needs permission to control Finder (asked once). |
+| `scripts/publish.sh [--notes "…"]` | Runs `make-dmg.sh`, then publishes the image and `latest.json` to the release folder (`RELEASE_DIR` or `.release-dir`) for the app's updater. See Publishing and updating. |
 | `scripts/make-signing-cert.sh` | Once per Mac without an Apple certificate: adds a self-signed code-signing certificate to your login keychain, so the Photos permission survives rebuilds. |
 
 With only the Command Line Tools, the macOS 27 SDK's SwiftUI needs a macro plugin that ships
@@ -177,7 +242,10 @@ With ad hoc signing macOS asks for Photos access again after each rebuild; run
 `scripts/make-signing-cert.sh` once to keep the permission across rebuilds.
 
 `PHOTO_SYNCER_SNAPSHOT=<folder>` makes the app draw each pane (and the Sync pane after
-syncing everything) into PNGs and quit, for checking the UI from a script.
+syncing everything) into PNGs and quit, for checking the UI from a script; the updater does
+nothing in that mode. To test the updater's installer from a script, run a scratch copy of the
+app with `PHOTO_SYNCER_HOME` set and `PHOTO_SYNCER_UPDATE_AUTOINSTALL=1`: it then installs a
+ready update without waiting for the click (the switch is ignored without `PHOTO_SYNCER_HOME`).
 
 ### Code
 
@@ -189,11 +257,17 @@ syncing everything) into PNGs and quit, for checking the UI from a script.
   - `Sync/SyncEngine.swift`: runs a mapping, Pix-Star overflow, backups, the log.
   - `Store/`: where files live (`Storage`: sync data folder versus this Mac's folder, moving
     between them, the `SyncLock`), and the per-mapping `Ledger` (merged on save).
+  - `Update/UpdateChecker.swift`: reading `latest.json` (`ReleaseInfo`), "is it newer", fetching
+    the disk image through a `ReleaseSource` (today a folder; a URL source would fit the same
+    protocol), the SHA-256 check, and this Mac's `UpdateSettings` (pure, tested).
 - `Sources/PhotoSyncer`: the SwiftUI app, in-app sign-in (`Auth/WebSessions.swift`), Google OAuth hand-off,
-  Settings (`Views/SettingsView.swift`).
+  Settings (`Views/SettingsView.swift`), and `Updater.swift`: when to check, the Updates
+  section's state, and `UpdateInstaller` (unpacks and checks the build, then hands the bundle
+  swap to a helper script that runs after the app quits).
+- `scripts/publish.sh`: the publishing half of the updater.
 - `Tests/PhotoSyncerCoreTests`: matching, page and response parsing (fixtures modelled on
   pix-star.com markup and Amazon responses, with made-up ids), the engine end to end against a
-  fake service.
+  fake service, and the update checker against made-up releases in a temporary folder.
 
 ## Contributing
 

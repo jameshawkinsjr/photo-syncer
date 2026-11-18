@@ -16,6 +16,17 @@ public enum Hashing {
         }
         return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
+
+    /// SHA-256 of a file as lowercase hex, read in chunks. Used to check downloaded updates.
+    public static func sha256(of url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while let chunk = try handle.read(upToCount: 4 << 20), !chunk.isEmpty {
+            hasher.update(data: chunk)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 /// Remembers the MD5s of source files by path, size and modification date, so a folder of
