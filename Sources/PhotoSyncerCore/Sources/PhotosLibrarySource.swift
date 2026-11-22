@@ -95,10 +95,27 @@ public enum PhotosLibrary {
         return !cloudIdentifiers(for: ids).isEmpty
     }
 
-    /// The person's albums and folders, as Photos shows them in its sidebar.
+    /// The person's albums and folders, as Photos shows them in its sidebar, plus iCloud Shared Albums under "Shared Albums".
     public static func albumTree() -> [PhotosAlbumNode] {
         let top = PHCollectionList.fetchTopLevelUserCollections(with: nil)
-        return nodes(in: top, parentPath: nil)
+        var tree = nodes(in: top, parentPath: nil)
+        let shared = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumCloudShared, options: nil)
+        var sharedNodes: [PhotosAlbumNode] = []
+        shared.enumerateObjects { album, _, _ in
+            let title = album.localizedTitle ?? "Untitled"
+            sharedNodes.append(albumNode(album, title: title, path: "Shared Albums › \(title)"))
+        }
+        if !sharedNodes.isEmpty {
+            tree.append(PhotosAlbumNode(id: "photosyncer.shared-albums", title: "Shared Albums", path: "Shared Albums", count: nil, children: sharedNodes))
+        }
+        return tree
+    }
+
+    private static func albumNode(_ album: PHAssetCollection, title: String, path: String) -> PhotosAlbumNode {
+        let options = PHFetchOptions()
+        options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
+        let count = PHAsset.fetchAssets(in: album, options: options).count
+        return PhotosAlbumNode(id: album.localIdentifier, title: title, path: path, count: count, children: nil)
     }
 
     private static func nodes(in result: PHFetchResult<PHCollection>, parentPath: String?) -> [PhotosAlbumNode] {
@@ -107,10 +124,7 @@ public enum PhotosLibrary {
             let title = collection.localizedTitle ?? "Untitled"
             let path = parentPath.map { "\($0) › \(title)" } ?? title
             if let album = collection as? PHAssetCollection {
-                let options = PHFetchOptions()
-                options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-                let count = PHAsset.fetchAssets(in: album, options: options).count
-                nodes.append(PhotosAlbumNode(id: album.localIdentifier, title: title, path: path, count: count, children: nil))
+                nodes.append(albumNode(album, title: title, path: path))
             } else if let list = collection as? PHCollectionList {
                 let children = self.nodes(in: PHCollection.fetchCollections(in: list, options: nil), parentPath: path)
                 nodes.append(PhotosAlbumNode(id: list.localIdentifier, title: title, path: path, count: nil, children: children))

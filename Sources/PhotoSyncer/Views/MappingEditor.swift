@@ -74,7 +74,7 @@ struct MappingEditor: View {
                         .selectionDisabled(node.isFolder)
                     }
                     .listStyle(.bordered)
-                    Text("Photos only; videos are skipped. Edits are included. Add photos to the album in Photos, then Sync.")
+                    Text("Includes iCloud Shared Albums. Photos only; videos are skipped. Edits are included. Add photos to the album in Photos, then Sync.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
                     VStack(alignment: .leading, spacing: 8) {
