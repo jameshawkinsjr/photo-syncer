@@ -21,7 +21,9 @@ Photos › Frames › Family ──┬──▶ Amazon Photos / Family
 
 ## Features
 
-- Sources: any album in the Photos library (edits included, iCloud-only photos downloaded),
+- Sources: any album in the Photos library, including iCloud Shared Albums (edits included,
+  iCloud-only photos downloaded; shared photos without an iCloud id are remembered by this
+  Mac's local id, so a second Mac may re-upload them),
   or a folder and its sub-folders.
 - Destinations: Amazon Photos, Google Photos, Pix-Star and local folders, with as many
   accounts per service as you like (for example two Pix-Star frames).
