@@ -7,12 +7,12 @@
 #                       "Photo Syncer Local Signing" (scripts/make-signing-cert.sh),
 #                       or ad-hoc ("-") if there is none.
 #   BUNDLE_ID           Bundle identifier (default: com.photosyncer.PhotoSyncer).
-#   VERSION             Version string (default: 1.0.0).
+#   VERSION             Version string (default: the VERSION file).
 
 APP_NAME="Photo Syncer"
 EXECUTABLE="PhotoSyncer"
 BUNDLE_ID="${BUNDLE_ID:-com.photosyncer.PhotoSyncer}"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-$(tr -d "[:space:]" < VERSION)}"
 BUILD_DIR="build"
 # The self-signed certificate scripts/make-signing-cert.sh creates.
 LOCAL_SIGNING_NAME="Photo Syncer Local Signing"

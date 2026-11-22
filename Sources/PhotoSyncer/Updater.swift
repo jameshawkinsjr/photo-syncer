@@ -21,7 +21,7 @@ struct InstalledApp: Equatable {
 
 /// Publish → release → update, the app's side of it.
 ///
-/// `scripts/publish.sh` puts a disk image and `latest.json` in the release folder. This looks
+/// `scripts/release.sh` puts a disk image and `latest.json` in the release folder. This looks
 /// there (at launch, when the app comes forward, and on Check Now), copies a newer build's
 /// disk image into the caches folder and checks its sha256, and then waits: nothing is
 /// installed until the person clicks Install & Restart. Finding and verifying a release is
@@ -75,7 +75,12 @@ final class Updater: ObservableObject {
             && !(environment["PHOTO_SYNCER_HOME"] ?? "").isEmpty
     }
 
-    var releaseFolder: URL? { settings.releaseFolderURL() }
+    /// The chosen folder, else this Mac's default one once something has been released to it.
+    var releaseFolder: URL? {
+        if let chosen = settings.releaseFolderURL() { return chosen }
+        let fallback = storage.defaultReleaseFolder
+        return FileManager.default.fileExists(atPath: fallback.path) ? fallback : nil
+    }
 
     /// Whether Install & Restart has something to install.
     var readyRelease: ReleaseInfo? {

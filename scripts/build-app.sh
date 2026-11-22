@@ -13,7 +13,7 @@
 #                       "Photo Syncer Local Signing" (scripts/make-signing-cert.sh),
 #                       or ad-hoc ("-") if there is none.
 #   BUNDLE_ID           Bundle identifier (default: com.photosyncer.PhotoSyncer).
-#   VERSION             Version string (default: 1.0.0).
+#   VERSION             Version string (default: the VERSION file).
 #
 # Why signing matters: macOS ties the Photos permission to the app's signature.
 # With a real certificate the permission survives rebuilds. An ad-hoc signature

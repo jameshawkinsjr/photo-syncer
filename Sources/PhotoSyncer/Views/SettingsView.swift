@@ -163,7 +163,7 @@ struct UpdatesSection: View {
         } header: {
             Text("Updates")
         } footer: {
-            Text("Photo Syncer looks in the release folder for a newer build (published there with scripts/publish.sh), copies it to this Mac and checks it. Nothing is installed until you click Install & Restart. Use a folder only you can change: the app installs what it finds there. After an update, macOS may ask for Photos access again.")
+            Text("Photo Syncer looks in the release folder for a newer build (published there with scripts/release.sh; with no folder chosen, the releases folder in this Mac's Photo Syncer folder), copies it to this Mac and checks it. Nothing is installed until you click Install & Restart. Use a folder only you can change: the app installs what it finds there. After an update, macOS may ask for Photos access again.")
                 .fixedSize(horizontal: false, vertical: true)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)

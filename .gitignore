@@ -12,5 +12,5 @@ CLAUDE.md
 CLAUDE.local.md
 .claude/
 
-# Where scripts/publish.sh publishes builds: your own folder, so not committed.
+# Where scripts/release.sh publishes builds: your own folder, so not committed.
 .release-dir

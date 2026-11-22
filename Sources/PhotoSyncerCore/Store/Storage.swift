@@ -18,6 +18,7 @@ import SystemConfiguration
 ///     secrets.json            Google client secret and tokens (mode 0600)
 ///     md5-cache.json          MD5s of source files, by path, size and date
 ///     updates.json            the release folder, and when updates were last checked
+///     releases/               where scripts/release.sh publishes by default
 ///
 /// A downloaded update waits in ~/Library/Caches/Photo Syncer/Updates until it's installed.
 ///
@@ -77,6 +78,8 @@ public struct Storage: Sendable {
     public var md5CacheURL: URL { localRoot.appendingPathComponent("md5-cache.json") }
     var locationURL: URL { localRoot.appendingPathComponent("location.json") }
     public var updateSettingsURL: URL { localRoot.appendingPathComponent("updates.json") }
+    /// The release folder when none is chosen; scripts/release.sh publishes here by default.
+    public var defaultReleaseFolder: URL { localRoot.appendingPathComponent("releases", isDirectory: true) }
 
     /// Where a downloaded update waits to be installed: the caches folder, or a folder inside
     /// this Mac's folder when that isn't the standard one (tests, and PHOTO_SYNCER_HOME).

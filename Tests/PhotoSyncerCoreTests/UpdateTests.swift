@@ -16,7 +16,7 @@ struct UpdateTests {
         init() { try? FileManager.default.createDirectory(at: releases, withIntermediateDirectories: true) }
         deinit { try? FileManager.default.removeItem(at: root) }
 
-        /// Writes a disk image and a `latest.json` announcing it, as scripts/publish.sh would.
+        /// Writes a disk image and a `latest.json` announcing it, as scripts/release.sh would.
         @discardableResult
         func publish(version: String = "1.2.0", build: Int = 42, contents: String = "disk image 42",
                      sha256: String? = nil, writeImage: Bool = true) throws -> ReleaseInfo {

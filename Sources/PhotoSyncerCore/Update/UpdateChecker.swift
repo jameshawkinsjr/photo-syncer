@@ -11,7 +11,7 @@ import Foundation
 ///       "notes": "Optional, one or two lines."
 ///     }
 ///
-/// `scripts/publish.sh` writes it, after the disk image is in place.
+/// `scripts/release.sh` writes it, after the disk image is in place.
 public struct ReleaseInfo: Codable, Equatable, Sendable {
     public var version: String
     public var build: Int

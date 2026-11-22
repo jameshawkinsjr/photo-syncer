@@ -166,18 +166,22 @@ files) in one throwaway folder.
 
 ## Publishing and updating
 
-If you build Photo Syncer yourself and run it on more than one Mac, the app can update itself
-from a **release folder**: any folder every Mac can reach (iCloud Drive, Dropbox, a shared
-drive), for example `~/Dropbox/Photo Syncer Releases`.
+If you build Photo Syncer yourself, the app can update itself from a **release folder**. By
+default that's `releases/` in this Mac's Photo Syncer folder
+(`~/Library/Application Support/Photo Syncer/releases`). To update more than one Mac, use a
+folder every Mac can reach (iCloud Drive, Dropbox, a shared drive), for example
+`~/Dropbox/Photo Syncer Releases`.
 
 **Publish** (on the Mac you build on):
 
-1. Create the folder, and tell the script where it is, once:
+1. For a shared folder, tell the script where it is, once:
    `echo "~/Dropbox/Photo Syncer Releases" > .release-dir` in the repository (the file is
-   gitignored), or set `RELEASE_DIR` each time.
-2. Commit your changes, then run `scripts/publish.sh` (optionally
-   `--notes "What changed"`). It builds the disk image, copies it to the folder, and then
-   writes `latest.json` there:
+   gitignored), or set `RELEASE_DIR` each time. Without either, it uses the default folder.
+2. Commit your changes, then run `scripts/release.sh` (optionally
+   `--notes "What changed"`; the notes default to the commit titles since the last release).
+   It builds the app, packs it in a disk image, copies that to the folder, writes
+   `latest.json` there, keeps the newest three images, and tags the commit
+   `v<version>-<build>` (pushed to `origin`; a failed push only warns):
 
    ```json
    {
@@ -191,12 +195,15 @@ drive), for example `~/Dropbox/Photo Syncer Releases`.
    ```
 
    The **build** number is the git commit count, and it's what decides "newer"; the version
-   (`VERSION=1.2.0 scripts/publish.sh`) is only shown. The script refuses to publish a build
-   that isn't higher than the one already in `latest.json`, so commit before publishing again.
+   (the `VERSION` file) is only shown. The script refuses to run with uncommitted changes or
+   to publish a build that isn't higher than the one already in `latest.json`, so commit
+   before releasing again. If you track the project in Handoff, an after-merge step that runs
+   `./scripts/release.sh` publishes each merged change.
 
 **Update** (on every Mac):
 
 1. **Settings › Updates › Choose…** and pick the release folder. Each Mac remembers its own.
+   With none chosen, the app uses the default folder once something has been released to it.
 2. Photo Syncer reads `latest.json` when it opens, when it comes forward (at most once an
    hour), and on **Check Now**. When the build there is newer, it copies the disk image to
    this Mac (waiting for iCloud to download it if needed) and checks its SHA-256.
@@ -221,8 +228,6 @@ Things to know:
   Applications folder is fine). If macOS says Photo Syncer was prevented from modifying apps,
   allow it under System Settings › Privacy & Security › App Management and click
   **Install & Restart** again.
-- Old disk images stay in the release folder; delete them when you like (the app only reads
-  the one `latest.json` names).
 
 ## Building
 
@@ -233,7 +238,7 @@ Needs the Xcode Command Line Tools (Xcode itself is optional) and macOS 14 or la
 | `scripts/test.sh` | Runs the tests (Swift Testing). |
 | `scripts/build-app.sh [--install] [--open]` | Builds `build/Photo Syncer.app`, optionally installs or opens it. |
 | `scripts/make-dmg.sh` | Builds the app and `build/Photo-Syncer-<version>.dmg`. Arranging the DMG window needs permission to control Finder (asked once). |
-| `scripts/publish.sh [--notes "…"]` | Runs `make-dmg.sh`, then publishes the image and `latest.json` to the release folder (`RELEASE_DIR` or `.release-dir`) for the app's updater. See Publishing and updating. |
+| `scripts/release.sh [--notes "…"]` | Builds the app from the committed code, publishes a disk image and `latest.json` to the release folder (`RELEASE_DIR`, `.release-dir`, else the default one) for the app's updater, and tags the commit. See Publishing and updating. |
 | `scripts/make-signing-cert.sh` | Once per Mac without an Apple certificate: adds a self-signed code-signing certificate to your login keychain, so the Photos permission survives rebuilds. |
 
 With only the Command Line Tools, the macOS 27 SDK's SwiftUI needs a macro plugin that ships
@@ -266,7 +271,7 @@ ready update without waiting for the click (the switch is ignored without `PHOTO
   Settings (`Views/SettingsView.swift`), and `Updater.swift`: when to check, the Updates
   section's state, and `UpdateInstaller` (unpacks and checks the build, then hands the bundle
   swap to a helper script that runs after the app quits).
-- `scripts/publish.sh`: the publishing half of the updater.
+- `scripts/release.sh`: the publishing half of the updater. `VERSION` holds the version number.
 - `Tests/PhotoSyncerCoreTests`: matching, page and response parsing (fixtures modelled on
   pix-star.com markup and Amazon responses, with made-up ids), the engine end to end against a
   fake service, and the update checker against made-up releases in a temporary folder.
