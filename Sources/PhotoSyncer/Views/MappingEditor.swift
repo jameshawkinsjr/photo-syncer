@@ -15,6 +15,7 @@ struct MappingEditor: View {
     @State private var albumTree: [PhotosAlbumNode] = []
     @State private var photosAllowed = PhotosLibrary.isAuthorized
     @State private var selectedAlbum: PhotosAlbumNode?
+    @State private var loadingAlbums = false
 
     @State private var accountId: UUID?
     @State private var destinations: [RemoteAlbum] = []
@@ -61,19 +62,22 @@ struct MappingEditor: View {
 
             if sourceKind == .photos {
                 if photosAllowed {
-                    List(albumTree, children: \.children, selection: Binding(
-                        get: { selectedAlbum?.id },
-                        set: { id in selectedAlbum = id.flatMap(find) })) { node in
-                        HStack {
-                            Image(systemName: node.isFolder ? "folder" : "rectangle.stack")
-                                .foregroundStyle(node.isFolder ? Color.secondary : Color.accentColor)
-                            Text(node.title)
-                            Spacer()
-                            if let count = node.count { Text("\(count)").foregroundStyle(.secondary).monospacedDigit() }
+                    ZStack {
+                        List(albumTree, children: \.children, selection: Binding(
+                            get: { selectedAlbum?.id },
+                            set: { id in selectedAlbum = id.flatMap(find) })) { node in
+                            HStack {
+                                Image(systemName: node.isFolder ? "folder" : "rectangle.stack")
+                                    .foregroundStyle(node.isFolder ? Color.secondary : Color.accentColor)
+                                Text(node.title)
+                                Spacer()
+                                if let count = node.count { Text("\(count)").foregroundStyle(.secondary).monospacedDigit() }
+                            }
+                            .selectionDisabled(node.isFolder)
                         }
-                        .selectionDisabled(node.isFolder)
+                        .listStyle(.bordered)
+                        if loadingAlbums { ProgressView() }
                     }
-                    .listStyle(.bordered)
                     Text("Includes iCloud Shared Albums. Photos only; videos are skipped. Edits are included. Add photos to the album in Photos, then Sync.")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
@@ -82,7 +86,7 @@ struct MappingEditor: View {
                         Button("Allow Access to Photos") {
                             Task {
                                 photosAllowed = await PhotosLibrary.requestAccess()
-                                if photosAllowed { albumTree = PhotosLibrary.albumTree() }
+                                if photosAllowed { await loadAlbums() }
                             }
                         }
                         Text("If nothing happens, allow it in System Settings › Privacy & Security › Photos.")
@@ -126,8 +130,8 @@ struct MappingEditor: View {
         switch sourceKind {
         case .photos:
             return selectedAlbum.map { album in
-                .photosAlbum(localIdentifier: album.id, title: album.path,
-                             cloudIdentifier: PhotosLibrary.cloudIdentifiers(for: [album.id])[album.id])
+                // The iCloud id is a PhotoKit call, so it's looked up once in commit(), not on every redraw.
+                .photosAlbum(localIdentifier: album.id, title: album.path, cloudIdentifier: nil)
             }
         case .folder:
             return folderPath.isEmpty ? nil : .folder(path: PortablePath.portable(folderPath))
@@ -243,7 +247,7 @@ struct MappingEditor: View {
     // MARK: Load and save
 
     private func load() {
-        if photosAllowed { albumTree = PhotosLibrary.albumTree() }
+        if photosAllowed { Task { await loadAlbums() } }
         guard let mapping else {
             accountId = model.config.accounts.first?.id
             return
@@ -252,18 +256,40 @@ struct MappingEditor: View {
         case .folder(let path):
             sourceKind = .folder
             folderPath = PortablePath.expand(path)
-        case .photosAlbum(let id, let title, let cloud):
+        case .photosAlbum(let id, let title, _):
             sourceKind = .photos
-            // The album may have been chosen on another Mac: find it by iCloud id or path.
-            let here = photosAllowed ? PhotosLibrary.resolveAlbum(localIdentifier: id, cloudIdentifier: cloud, path: title)?.localIdentifier : nil
-            selectedAlbum = here.flatMap(find) ?? PhotosAlbumNode(id: id, title: title, path: title, count: nil, children: nil)
+            // Until loadAlbums() finds it in this Mac's library.
+            selectedAlbum = PhotosAlbumNode(id: id, title: title, path: title, count: nil, children: nil)
         }
         accountId = mapping.accountId
         selectedDestination = mapping.destination
     }
 
+    /// Lists the albums off the main thread, then fills in their photo counts, which take a while
+    /// on a big library, so the sheet opens at once and the list is usable before the counts arrive.
+    private func loadAlbums() async {
+        loadingAlbums = true
+        var stored: (id: String, cloud: String?, path: String)?
+        if case .photosAlbum(let id, let title, let cloud) = mapping?.source { stored = (id, cloud, title) }
+        let (tree, here) = await Task.detached { [stored] in
+            let tree = PhotosLibrary.albumTree()
+            // The album may have been chosen on another Mac: find it by iCloud id or path.
+            let here = stored.flatMap {
+                PhotosLibrary.resolveAlbum(localIdentifier: $0.id, cloudIdentifier: $0.cloud, path: $0.path, in: tree)?.localIdentifier
+            }
+            return (tree, here)
+        }.value
+        albumTree = tree
+        if let here, let node = find(here), selectedAlbum?.id == stored?.id { selectedAlbum = node }
+        loadingAlbums = false
+        albumTree = await Task.detached { tree.map { $0.withCounts(PhotosLibrary.photoCount) } }.value
+    }
+
     private func commit() {
-        guard let source, let accountId, let selectedDestination else { return }
+        guard var source, let accountId, let selectedDestination else { return }
+        if case .photosAlbum(let id, let title, _) = source {
+            source = .photosAlbum(localIdentifier: id, title: title, cloudIdentifier: PhotosLibrary.cloudIdentifiers(for: [id])[id])
+        }
         var result = mapping ?? Mapping(source: source, accountId: accountId, destination: selectedDestination)
         let changedTarget = result.accountId != accountId || result.destination.id != selectedDestination.id
             || !result.source.isSameSource(as: source)

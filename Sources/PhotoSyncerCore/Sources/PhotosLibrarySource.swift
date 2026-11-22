@@ -20,6 +20,13 @@ public struct PhotosAlbumNode: Identifiable, Hashable, Sendable {
         self.count = count
         self.children = children
     }
+
+    /// The same tree with each album's count from `count` (folders keep none).
+    public func withCounts(_ count: (String) -> Int?) -> PhotosAlbumNode {
+        var node = self
+        if let children { node.children = children.map { $0.withCounts(count) } } else { node.count = count(id) }
+        return node
+    }
 }
 
 public enum PhotosLibrary {
@@ -64,8 +71,9 @@ public enum PhotosLibrary {
     }
 
     /// Finds an album chosen on this or another Mac: by this Mac's id, then its iCloud id, then
-    /// its path in the sidebar ("Frames › Family").
-    public static func resolveAlbum(localIdentifier: String, cloudIdentifier: String?, path: String) -> PHAssetCollection? {
+    /// its path in the sidebar ("Frames › Family"), searched in `tree` if given (else a fresh `albumTree()`).
+    public static func resolveAlbum(localIdentifier: String, cloudIdentifier: String?, path: String,
+                                    in tree: [PhotosAlbumNode]? = nil) -> PHAssetCollection? {
         if let album = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [localIdentifier], options: nil).firstObject {
             return album
         }
@@ -80,7 +88,7 @@ public enum PhotosLibrary {
             }
             return nil
         }
-        guard let id = search(albumTree()) else { return nil }
+        guard let id = search(tree ?? albumTree()) else { return nil }
         return PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil).firstObject
     }
 
@@ -96,6 +104,7 @@ public enum PhotosLibrary {
     }
 
     /// The person's albums and folders, as Photos shows them in its sidebar, plus iCloud Shared Albums under "Shared Albums".
+    /// Counts are left out (nil): they're the slow part on a big library; see `photoCount(albumId:)`.
     public static func albumTree() -> [PhotosAlbumNode] {
         let top = PHCollectionList.fetchTopLevelUserCollections(with: nil)
         var tree = nodes(in: top, parentPath: nil)
@@ -103,7 +112,7 @@ public enum PhotosLibrary {
         var sharedNodes: [PhotosAlbumNode] = []
         shared.enumerateObjects { album, _, _ in
             let title = album.localizedTitle ?? "Untitled"
-            sharedNodes.append(albumNode(album, title: title, path: "Shared Albums › \(title)"))
+            sharedNodes.append(PhotosAlbumNode(id: album.localIdentifier, title: title, path: "Shared Albums › \(title)", count: nil, children: nil))
         }
         if !sharedNodes.isEmpty {
             tree.append(PhotosAlbumNode(id: "photosyncer.shared-albums", title: "Shared Albums", path: "Shared Albums", count: nil, children: sharedNodes))
@@ -111,11 +120,12 @@ public enum PhotosLibrary {
         return tree
     }
 
-    private static func albumNode(_ album: PHAssetCollection, title: String, path: String) -> PhotosAlbumNode {
+    /// Photos (not videos) in an album. A real query per album, so slow over many albums in a big library.
+    public static func photoCount(albumId: String) -> Int? {
+        guard let album = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [albumId], options: nil).firstObject else { return nil }
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format: "mediaType == %d", PHAssetMediaType.image.rawValue)
-        let count = PHAsset.fetchAssets(in: album, options: options).count
-        return PhotosAlbumNode(id: album.localIdentifier, title: title, path: path, count: count, children: nil)
+        return PHAsset.fetchAssets(in: album, options: options).count
     }
 
     private static func nodes(in result: PHFetchResult<PHCollection>, parentPath: String?) -> [PhotosAlbumNode] {
@@ -124,7 +134,7 @@ public enum PhotosLibrary {
             let title = collection.localizedTitle ?? "Untitled"
             let path = parentPath.map { "\($0) › \(title)" } ?? title
             if let album = collection as? PHAssetCollection {
-                nodes.append(albumNode(album, title: title, path: path))
+                nodes.append(PhotosAlbumNode(id: album.localIdentifier, title: title, path: path, count: nil, children: nil))
             } else if let list = collection as? PHCollectionList {
                 let children = self.nodes(in: PHCollection.fetchCollections(in: list, options: nil), parentPath: path)
                 nodes.append(PhotosAlbumNode(id: list.localIdentifier, title: title, path: path, count: nil, children: children))
